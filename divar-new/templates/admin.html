@@ -1,0 +1,496 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>پنل مدیریت | دیده‌بان</title>
+<script>
+(function(){try{var t=localStorage.getItem('divar_theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t);else document.documentElement.setAttribute('data-theme','dark');}catch(e){document.documentElement.setAttribute('data-theme','dark');}})();
+</script>
+<link rel="stylesheet" href="/static/css/app.css">
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#070A12">
+    <style>
+    .admin-tabs{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:18px}
+    .user-editor[hidden]{display:none}
+    .editor-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:14px}
+    .editor-head h3{margin:0 0 3px;font-weight:800}
+    .editor-head p{margin:0;color:var(--text-3);font-size:.76rem}
+    .admin-close{width:32px;height:32px;border-radius:8px;border:1px solid var(--line);background:var(--panel-2);color:var(--text-2);cursor:pointer;font:inherit}
+    .admin-close:hover{color:var(--rose);border-color:var(--rose)}
+    .editor-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+    .editor-check{display:flex;align-items:center;gap:7px;padding-top:28px;color:var(--text);font-size:.84rem;font-weight:700}
+    .editor-check label{margin:0}
+    .editor-note{margin-top:8px;color:var(--text-3);font-size:.73rem;line-height:1.6}
+    .editor-message{min-height:1.35em;margin-top:9px;font-size:.78rem;color:var(--text-2)}
+    .editor-message.error{color:var(--rose)}
+    .editor-message.success{color:var(--cyan)}
+    .admin-tab{
+  padding:9px 16px;border-radius:999px;border:1px solid var(--line);
+  background:var(--panel);color:var(--text-2);font-weight:700;font-size:.84rem;
+  cursor:pointer;font-family:inherit;
+}
+.admin-tab.on,.admin-tab:hover{border-color:var(--cyan);color:var(--cyan);background:var(--cyan-dim)}
+.admin-panel{display:none}
+.admin-panel.on{display:block}
+.form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:12px}
+.form-grid label{display:block;font-size:.74rem;font-weight:600;color:var(--text-3);margin-bottom:6px}
+.admin-table{width:100%;border-collapse:collapse;font-size:.84rem}
+.admin-table th,.admin-table td{padding:10px 8px;border-bottom:1px solid var(--line);text-align:right;vertical-align:middle}
+.admin-table th{color:var(--text-3);font-weight:700;font-size:.75rem}
+.admin-table tr:hover td{background:var(--panel-2)}
+.admin-actions{display:flex;flex-wrap:wrap;gap:6px}
+.admin-actions button,.admin-actions a{
+  padding:6px 10px;border-radius:8px;border:1px solid var(--line);
+  background:var(--panel-2);color:var(--text);font-size:.75rem;font-weight:600;
+  cursor:pointer;font-family:inherit;text-decoration:none;
+}
+.admin-actions button.ok{border-color:var(--cyan);color:var(--cyan)}
+.admin-actions button.bad{border-color:var(--rose);color:var(--rose)}
+.chat-list{display:grid;grid-template-columns:220px 1fr;gap:12px;min-height:320px}
+@media(max-width:760px){.chat-list{grid-template-columns:1fr}}
+.chat-users{border:1px solid var(--line);border-radius:12px;overflow:auto;max-height:400px;background:var(--panel)}
+.chat-user{padding:10px 12px;border-bottom:1px solid var(--line);cursor:pointer;font-size:.84rem}
+.chat-user:hover,.chat-user.on{background:var(--cyan-dim);color:var(--cyan)}
+.chat-box{border:1px solid var(--line);border-radius:12px;padding:12px;background:var(--panel);display:flex;flex-direction:column}
+.chat-msgs{flex:1;overflow:auto;max-height:320px;margin-bottom:10px}
+.chat-msgs .b{padding:8px 10px;border-radius:10px;margin:6px 0;font-size:.84rem;max-width:85%}
+.chat-msgs .b.user{background:var(--panel-2);margin-left:auto}
+.chat-msgs .b.admin{background:var(--cyan-dim);color:var(--cyan);margin-right:auto}
+.composer{display:flex;gap:8px}
+.composer input{flex:1}
+</style>
+</head>
+<body>
+<div class="side-overlay" id="sideOverlay" onclick="closeSide()"></div>
+<div class="app-frame">
+  <aside class="sidebar" id="sidebar">
+    <a class="side-brand" href="/">
+      <span class="side-logo">📡</span>
+      <span><strong>دیده‌بان</strong><small>پنل مدیریت</small></span>
+    </a>
+    <nav class="side-nav">
+      <a class="side-link" href="/"><span class="ico">⌘</span> داشبورد</a>
+      <a class="side-link" href="/notifications"><span class="ico">🔔</span> اعلان‌ها</a>
+      <a class="side-link" href="/subscribe"><span class="ico">💎</span> اشتراک</a>
+      <a class="side-link" href="/support"><span class="ico">💬</span> پشتیبانی</a>
+      <a class="side-link" href="/account"><span class="ico">👤</span> حساب</a>
+      <a class="side-link active" href="/admin"><span class="ico">🛠</span> مدیریت</a>
+    </nav>
+    <div class="side-foot">
+      <button type="button" class="theme-toggle" data-theme-toggle>
+        <span><span class="theme-ico">☀️</span> <span class="theme-lbl">تم روشن</span></span>
+      </button>
+      <a class="side-link" href="/logout"><span class="ico">⎋</span> خروج</a>
+    </div>
+  </aside>
+  <div class="main-col">
+    <div class="topbar-mobile">
+      <a class="brand-m" href="/"><span class="side-logo" style="width:32px;height:32px;font-size:.9rem;border-radius:9px">📡</span> مدیریت</a>
+      <button type="button" class="menu-btn" onclick="openSide()">☰</button>
+    </div>
+    <div class="content">
+      <div class="page-head">
+        <div class="eyebrow">Admin</div>
+        <h1>پنل مدیریت</h1>
+        <p>کاربران، پرداخت‌ها، محتوا و پشتیبانی</p>
+      </div>
+
+      <div class="admin-tabs">
+        <button class="admin-tab on" data-t="users">کاربران</button>
+        <button class="admin-tab" data-t="payments">پرداخت‌ها</button>
+        <button class="admin-tab" data-t="settings">تنظیمات پرداخت</button>
+        <button class="admin-tab" data-t="content">محتوای صفحات</button>
+        <button class="admin-tab" data-t="support">پشتیبانی</button>
+      </div>
+
+      <div class="admin-panel on" id="p-users">
+        <div class="card">
+          <h3 style="margin:0 0 12px;font-weight:800">ساخت کاربر</h3>
+          <div class="form-grid">
+            <div><label>نام کاربری</label><input id="nu_username" class="neo-input"></div>
+            <div><label>رمز عبور</label><input id="nu_password" type="password" class="neo-input"></div>
+            <div><label>نقش</label><select id="nu_role" class="neo-select"><option value="user">کاربر</option><option value="admin">مدیر</option></select></div>
+            <div><label>پلن</label><input id="nu_plan" value="pro" class="neo-input"></div>
+            <div><label>تعداد روز</label><input id="nu_days" type="number" value="30" class="neo-input"></div>
+            <div><label>سقف مانیتور</label><input id="nu_max" type="number" value="3" class="neo-input"></div>
+          </div>
+          <button class="btn-neo btn-primary-neo" onclick="createUser()">ساخت کاربر</button>
+        </div>
+
+        <div class="card user-editor" id="userEditor" hidden style="margin-top:16px">
+          <div class="editor-head">
+            <div>
+              <h3>ویرایش حساب کاربر</h3>
+              <p id="editUserSubtitle">تنظیمات دسترسی، اشتراک و اعلان‌ها را تغییر دهید.</p>
+            </div>
+            <button type="button" class="admin-close" onclick="closeUserEditor()" aria-label="بستن ویرایش کاربر">✕</button>
+          </div>
+          <input id="eu_id" type="hidden">
+          <div class="form-grid">
+            <div><label>نام کاربری</label><input id="eu_username" class="neo-input" autocomplete="username"></div>
+            <div><label>نقش</label><select id="eu_role" class="neo-select"><option value="user">کاربر</option><option value="admin">مدیر</option></select></div>
+            <div><label>پلن</label><input id="eu_plan" class="neo-input" placeholder="free / pro / vip"></div>
+            <div class="editor-check"><input id="eu_active" type="checkbox"> <label for="eu_active">حساب فعال است</label></div>
+            <div><label>سقف مانیتور</label><input id="eu_max" type="number" min="0" max="9999" class="neo-input"></div>
+            <div><label>انقضای اشتراک</label><input id="eu_expiry" type="datetime-local" class="neo-input"></div>
+            <div><label>ایمیل اعلان</label><input id="eu_email" type="email" class="neo-input" autocomplete="email"></div>
+            <div><label>شناسه چت تلگرام</label><input id="eu_telegram" class="neo-input" inputmode="numeric"></div>
+            <div><label>رمز عبور جدید <small>(اختیاری)</small></label><input id="eu_password" type="password" minlength="6" class="neo-input" autocomplete="new-password" placeholder="حداقل ۶ کاراکتر"></div>
+          </div>
+          <p class="editor-note">برای پاک‌کردن تاریخ انقضا، آن را خالی بگذارید. مدیرها به اشتراک تاریخ‌دار نیاز ندارند.</p>
+          <div class="editor-actions">
+            <button type="button" class="btn-neo btn-primary-neo" onclick="saveUserEdit()">ذخیره تغییرات</button>
+            <button type="button" class="btn-neo" onclick="closeUserEditor()">انصراف</button>
+          </div>
+          <div id="userEditorMessage" class="editor-message" role="status" aria-live="polite"></div>
+        </div>
+
+        <div class="card" style="margin-top:16px;overflow-x:auto">
+          <h3 style="margin:0 0 12px;font-weight:800">لیست کاربران</h3>
+          <table class="admin-table"><thead><tr><th>کاربر</th><th>نقش</th><th>پلن</th><th>وضعیت</th><th>انقضا</th><th>مانیتور</th><th>عملیات</th></tr></thead>
+          <tbody id="usersBody"></tbody></table>
+        </div>
+      </div>
+
+      <div class="admin-panel" id="p-payments">
+        <div class="card" style="overflow-x:auto">
+          <h3 style="margin:0 0 12px;font-weight:800">درخواست‌های پرداخت
+            <select id="payFilter" onchange="loadPayments()" class="neo-select" style="width:auto;display:inline-block;margin-right:8px;padding:6px 10px">
+              <option value="pending">در انتظار</option>
+              <option value="approved">تأیید شده</option>
+              <option value="rejected">رد شده</option>
+              <option value="all">همه</option>
+            </select>
+          </h3>
+          <table class="admin-table"><thead><tr><th>کاربر</th><th>پلن</th><th>مبلغ</th><th>موبایل</th><th>رسید</th><th>وضعیت</th><th>عملیات</th></tr></thead>
+          <tbody id="payBody"></tbody></table>
+        </div>
+      </div>
+
+      <div class="admin-panel" id="p-settings">
+        <div class="card">
+          <h3 style="margin:0 0 12px;font-weight:800">تنظیمات پرداخت</h3>
+          <div class="form-grid">
+            <div><label>شماره کارت</label><input id="s_card" class="neo-input"></div>
+            <div><label>نام صاحب کارت</label><input id="s_holder" class="neo-input"></div>
+            <div><label>بانک</label><input id="s_bank" class="neo-input"></div>
+            <div><label>تلفن پشتیبانی</label><input id="s_note" class="neo-input"></div>
+          </div>
+          <h4 style="margin:16px 0 8px">پلن‌ها (JSON)</h4>
+          <textarea id="s_plans" rows="8" style="width:100%;font-family:monospace;font-size:.8rem" class="neo-input"></textarea>
+          <button class="btn-neo btn-primary-neo" style="margin-top:12px" onclick="saveSettings()">ذخیره تنظیمات</button>
+          <div id="settingsMsg" class="msg"></div>
+        </div>
+      </div>
+
+      <div class="admin-panel" id="p-content">
+        <div class="card">
+          <h3 style="margin:0 0 12px;font-weight:800">محتوای صفحات</h3>
+          <div class="form-grid">
+            <div>
+              <label>صفحه</label>
+              <select id="cmsKey" class="neo-select" onchange="loadCmsItem()">
+                <option value="guide">راهنما</option>
+                <option value="buy_guide">راهنمای خرید</option>
+                <option value="terms">قوانین</option>
+                <option value="about">درباره ما</option>
+              </select>
+            </div>
+            <div><label>عنوان</label><input id="cmsTitle" class="neo-input"></div>
+          </div>
+          <label>متن (HTML ساده مجاز)</label>
+          <textarea id="cmsBody" rows="12" style="width:100%" class="neo-input"></textarea>
+          <button class="btn-neo btn-primary-neo" style="margin-top:12px" onclick="saveCms()">ذخیره محتوا</button>
+          <div id="cmsMsg" class="msg"></div>
+        </div>
+      </div>
+
+      <div class="admin-panel" id="p-support">
+        <div class="card">
+          <h3 style="margin:0 0 12px;font-weight:800">پشتیبانی</h3>
+          <div class="chat-list">
+            <div class="chat-users" id="supportUsers"></div>
+            <div class="chat-box">
+              <div class="chat-msgs" id="supportMsgs"></div>
+              <div class="composer">
+                <input id="adminMsg" class="neo-input" placeholder="پاسخ به کاربر…">
+                <button class="btn-neo btn-primary-neo" style="padding:10px 16px" onclick="sendAdminMsg()">ارسال</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+<script>
+function openSide(){document.getElementById('sidebar').classList.add('open');document.getElementById('sideOverlay').classList.add('show')}
+function closeSide(){document.getElementById('sidebar').classList.remove('open');document.getElementById('sideOverlay').classList.remove('show')}
+</script>
+<script>
+document.querySelectorAll('.admin-tab').forEach(t=>{
+  t.onclick=()=>{
+    document.querySelectorAll('.admin-tab').forEach(x=>x.classList.remove('on'));
+    document.querySelectorAll('.admin-panel').forEach(x=>x.classList.remove('on'));
+    t.classList.add('on');
+    document.getElementById('p-'+t.dataset.t).classList.add('on');
+    if(t.dataset.t==='payments') loadPayments();
+    if(t.dataset.t==='settings') loadSettings();
+    if(t.dataset.t==='content'){ cmsCache=null; loadCmsItem(); }
+    if(t.dataset.t==='support') loadSupportUsers();
+  };
+});
+
+let adminUsersById = new Map();
+const adminErrorMessages = {
+  invalid: 'اطلاعات ارسال‌شده معتبر نیست.', username: 'نام کاربری باید بین ۳ تا ۸۰ کاراکتر باشد.',
+  password: 'رمز عبور باید حداقل ۶ کاراکتر باشد.', role: 'نقش انتخاب‌شده معتبر نیست.',
+  plan: 'نام پلن معتبر نیست.', max_monitors: 'سقف مانیتور باید عددی بین ۰ تا ۹۹۹۹ باشد.',
+  subscription_expires_at: 'تاریخ انقضا معتبر نیست.', exists: 'این نام کاربری قبلاً استفاده شده است.',
+  last_active_admin: 'آخرین مدیر فعال را نمی‌توان غیرفعال یا تنزل نقش داد.', not_found: 'کاربر پیدا نشد.'
+};
+function escapeHtml(value){
+  return String(value ?? '').replace(/[&<>'\"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[ch]));
+}
+function adminErrorMessage(code){ return adminErrorMessages[code] || code || 'خطا در انجام عملیات'; }
+function asDateTimeLocal(value){ return value ? String(value).slice(0,16) : ''; }
+function setUserEditorMessage(message='', type=''){
+  const box=document.getElementById('userEditorMessage');
+  box.textContent=message;
+  box.className='editor-message'+(type ? ' '+type : '');
+}
+async function loadUsers(){
+  const body=document.getElementById('usersBody');
+  try{
+    const r=await fetch('/api/admin/users');
+    const list=await r.json();
+    if(!r.ok || !Array.isArray(list)) throw new Error('load_users');
+    adminUsersById=new Map(list.map(u=>[Number(u.id),u]));
+    body.innerHTML='';
+    list.forEach(u=>{
+      const id=Number(u.id), active=Number(u.is_active) === 1;
+      const tr=document.createElement('tr');
+      tr.innerHTML=`
+        <td><b>${escapeHtml(u.username)}</b><br><small style="color:var(--text-3)">#${id}</small></td>
+        <td>${escapeHtml(u.role || 'user')}</td>
+        <td>${escapeHtml(u.plan || '-')}</td>
+        <td>${active?'✅ فعال':'❌ غیرفعال'}</td>
+        <td style="font-size:.75rem">${escapeHtml(asDateTimeLocal(u.subscription_expires_at) || '—')}</td>
+        <td>${Number.isFinite(Number(u.max_monitors)) ? Number(u.max_monitors) : 0}</td>
+        <td class="admin-actions">
+          <button type="button" onclick="openUserEditor(${id})">ویرایش</button>
+          <button type="button" class="ok" onclick="extendUser(${id},30)">+۳۰ روز</button>
+          ${u.role!=='admin'?`<button type="button" class="bad" onclick="deleteUser(${id})">حذف</button>`:''}
+        </td>`;
+      body.appendChild(tr);
+    });
+  }catch(err){
+    body.innerHTML='<tr><td colspan="7" style="color:var(--rose)">خطا در دریافت کاربران</td></tr>';
+  }
+}
+function syncEditorRole(){
+  const isAdmin=document.getElementById('eu_role').value==='admin';
+  const expiry=document.getElementById('eu_expiry');
+  expiry.disabled=isAdmin;
+  if(isAdmin) expiry.value='';
+}
+function openUserEditor(id){
+  const user=adminUsersById.get(Number(id));
+  if(!user) return;
+  document.getElementById('eu_id').value=String(id);
+  document.getElementById('eu_username').value=user.username || '';
+  document.getElementById('eu_role').value=user.role === 'admin' ? 'admin' : 'user';
+  document.getElementById('eu_plan').value=user.plan || 'free';
+  document.getElementById('eu_active').checked=Number(user.is_active) === 1;
+  document.getElementById('eu_max').value=Number.isFinite(Number(user.max_monitors)) ? Number(user.max_monitors) : 0;
+  document.getElementById('eu_expiry').value=asDateTimeLocal(user.subscription_expires_at);
+  document.getElementById('eu_email').value=user.notify_email || '';
+  document.getElementById('eu_telegram').value=user.telegram_chat_id || '';
+  document.getElementById('eu_password').value='';
+  document.getElementById('editUserSubtitle').textContent=`ویرایش حساب ${user.username || ('#'+id)}`;
+  syncEditorRole();
+  setUserEditorMessage();
+  const editor=document.getElementById('userEditor');
+  editor.hidden=false;
+  editor.scrollIntoView({behavior:'smooth',block:'nearest'});
+}
+function closeUserEditor(){
+  document.getElementById('userEditor').hidden=true;
+  document.getElementById('eu_password').value='';
+  setUserEditorMessage();
+}
+async function saveUserEdit(){
+  const id=Number(document.getElementById('eu_id').value);
+  if(!Number.isInteger(id) || id<=0) return;
+  const password=document.getElementById('eu_password').value;
+  if(password && password.length<6){ setUserEditorMessage('رمز عبور باید حداقل ۶ کاراکتر باشد.','error'); return; }
+  const payload={
+    username:document.getElementById('eu_username').value.trim(),
+    role:document.getElementById('eu_role').value,
+    plan:document.getElementById('eu_plan').value.trim(),
+    is_active:document.getElementById('eu_active').checked,
+    max_monitors:parseInt(document.getElementById('eu_max').value||'0',10),
+    subscription_expires_at:document.getElementById('eu_expiry').value || null,
+    notify_email:document.getElementById('eu_email').value.trim(),
+    telegram_chat_id:document.getElementById('eu_telegram').value.trim()
+  };
+  if(password) payload.password=password;
+  setUserEditorMessage('در حال ذخیره…');
+  try{
+    const r=await fetch(`/api/admin/users/${id}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    const d=await r.json().catch(()=>({}));
+    if(!r.ok || !d.success){ setUserEditorMessage(adminErrorMessage(d.error),'error'); return; }
+    setUserEditorMessage('تغییرات ذخیره شد.','success');
+    await loadUsers();
+  }catch(err){ setUserEditorMessage('ارتباط با سرور برقرار نشد.','error'); }
+}
+async function createUser(){
+  const payload={
+    username:document.getElementById('nu_username').value.trim(),
+    password:document.getElementById('nu_password').value,
+    role:document.getElementById('nu_role').value,
+    plan:document.getElementById('nu_plan').value.trim()||'pro',
+    days:parseInt(document.getElementById('nu_days').value||'30',10),
+    max_monitors:parseInt(document.getElementById('nu_max').value||'3',10)
+  };
+  try{
+    const r=await fetch('/api/admin/users',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    const d=await r.json().catch(()=>({}));
+    if(d.success){
+      document.getElementById('nu_password').value='';
+      alert('کاربر ساخته شد');
+      loadUsers();
+    }else alert(adminErrorMessage(d.error));
+  }catch(err){ alert('ارتباط با سرور برقرار نشد.'); }
+}
+async function extendUser(id,days){
+  const r=await fetch(`/api/admin/users/${id}/extend`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({days})});
+  const d=await r.json().catch(()=>({}));
+  if(d.success) loadUsers(); else alert(adminErrorMessage(d.error));
+}
+document.getElementById('eu_role').addEventListener('change',syncEditorRole);
+async function deleteUser(id){
+  if(!confirm('حذف کاربر؟')) return;
+  const r=await fetch(`/api/admin/users/${id}`,{method:'DELETE'});
+  const d=await r.json(); if(d.success) loadUsers();
+}
+
+async function loadPayments(){
+  const st=document.getElementById('payFilter').value;
+  const r=await fetch('/api/admin/payments?status='+encodeURIComponent(st));
+  const list=await r.json();
+  const body=document.getElementById('payBody'); body.innerHTML='';
+  list.forEach(p=>{
+    const tr=document.createElement('tr');
+    const receipt=p.receipt_path?`<a href="/uploads/receipts/${p.receipt_path.split('/').pop()}" target="_blank">رسید</a>`:'—';
+    tr.innerHTML=`
+      <td>${p.username||p.user_id}</td>
+      <td>${p.plan_name||p.plan_id}</td>
+      <td>${p.amount||0}</td>
+      <td>${p.phone||'—'}</td>
+      <td>${receipt}</td>
+      <td>${p.status}</td>
+      <td class="admin-actions">
+        ${p.status==='pending'?`
+          <button class="ok" onclick="reviewPay(${p.id},'approved')">تأیید</button>
+          <button class="bad" onclick="reviewPay(${p.id},'rejected')">رد</button>
+        `:''}
+      </td>`;
+    body.appendChild(tr);
+  });
+}
+async function reviewPay(id,status){
+  const note=prompt(status==='approved'?'یادداشت (اختیاری):':'دلیل رد:')||'';
+  const r=await fetch(`/api/admin/payments/${id}/review`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({status,note})});
+  const d=await r.json(); if(d.success) loadPayments(); else alert(d.error||'خطا');
+}
+
+async function loadSettings(){
+  const r=await fetch('/api/admin/settings');
+  const d=await r.json();
+  document.getElementById('s_card').value=d.card_number||'';
+  document.getElementById('s_holder').value=d.card_owner||d.card_holder||'';
+  document.getElementById('s_bank').value=d.bank_name||'';
+  document.getElementById('s_note').value=d.support_phone||d.note||'';
+  document.getElementById('s_plans').value=typeof d.plans==='string'?d.plans:JSON.stringify(d.plans||[],null,2);
+}
+async function saveSettings(){
+  let plans;
+  try{ plans=JSON.parse(document.getElementById('s_plans').value); }catch(e){ alert('JSON پلن‌ها نامعتبر'); return; }
+  const payload={
+    card_number:document.getElementById('s_card').value,
+    card_owner:document.getElementById('s_holder').value,
+    bank_name:document.getElementById('s_bank').value,
+    support_phone:document.getElementById('s_note').value,
+    plans
+  };
+  const r=await fetch('/api/admin/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+  const d=await r.json();
+  document.getElementById('settingsMsg').textContent=d.success?'ذخیره شد':'خطا';
+}
+
+let cmsCache=null;
+async function loadCmsItem(){
+  const key=document.getElementById('cmsKey').value;
+  if(!cmsCache){
+    const r=await fetch('/api/admin/content');
+    cmsCache=await r.json();
+  }
+  const item=(cmsCache||[]).find(x=>x.key===key)||{title:'',body:''};
+  document.getElementById('cmsTitle').value=item.title||'';
+  document.getElementById('cmsBody').value=item.body||'';
+}
+async function saveCms(){
+  const payload={
+    key:document.getElementById('cmsKey').value,
+    title:document.getElementById('cmsTitle').value,
+    body:document.getElementById('cmsBody').value
+  };
+  const r=await fetch('/api/admin/content',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+  const d=await r.json();
+  document.getElementById('cmsMsg').textContent=d.success?'ذخیره شد':'خطا';
+  cmsCache=null;
+}
+
+let currentUid=null;
+async function loadSupportUsers(){
+  const r=await fetch('/api/admin/support/threads');
+  const list=await r.json();
+  const box=document.getElementById('supportUsers'); box.innerHTML='';
+  list.forEach(u=>{
+    const el=document.createElement('div');
+    el.className='chat-user'+(currentUid===u.user_id?' on':'');
+    el.textContent=(u.username||('#'+u.user_id))+(u.unread?` (${u.unread})`:'');
+    el.onclick=()=>{currentUid=u.user_id;loadSupportUsers();loadThreadMsgs()};
+    box.appendChild(el);
+  });
+}
+async function loadThreadMsgs(){
+  if(!currentUid)return;
+  const r=await fetch(`/api/admin/support/${currentUid}/messages`);
+  const list=await r.json();
+  const box=document.getElementById('supportMsgs'); box.innerHTML='';
+  (list.messages||list).forEach(m=>{
+    const b=document.createElement('div');
+    b.className='b '+(m.sender==='admin'?'admin':'user');
+    b.textContent=m.message;
+    box.appendChild(b);
+  });
+  box.scrollTop=box.scrollHeight;
+}
+async function sendAdminMsg(){
+  if(!currentUid)return;
+  const input=document.getElementById('adminMsg'); const text=input.value.trim(); if(!text)return;
+  input.value='';
+  await fetch(`/api/admin/support/${currentUid}/messages`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text})});
+  loadThreadMsgs();
+}
+
+loadUsers();
+</script>
+<script src="/static/js/theme.js"></script>
+<script src="/static/pwa.js" defer></script>
+</body>
+</html>

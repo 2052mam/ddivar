@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ثبت‌نام | دیده‌بان</title>
+<script>
+(function(){try{var t=localStorage.getItem('divar_theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t);else document.documentElement.setAttribute('data-theme','dark');}catch(e){document.documentElement.setAttribute('data-theme','dark');}})();
+</script>
+<link rel="stylesheet" href="/static/css/app.css">
+<meta name="theme-color" content="#070A12">
+</head>
+<body>
+<button type="button" class="theme-toggle" data-theme-toggle style="position:fixed;top:16px;left:16px;z-index:5;width:auto;padding:8px 12px"><span class="theme-ico">☀️</span> <span class="theme-lbl">تم روشن</span></button>
+<div class="auth-page">
+  <form class="auth-card" method="post">
+    <div class="mark">📡</div>
+    <h1>ساخت حساب</h1>
+    <p class="lead">دوره آزمایشی فعال می‌شود — بدون کارت بانکی</p>
+    <label for="username">نام کاربری</label>
+    <input id="username" name="username" required minlength="3" placeholder="حداقل ۳ کاراکتر">
+    <label for="password">رمز عبور</label>
+    <input id="password" name="password" type="password" required minlength="6" placeholder="حداقل ۶ کاراکتر">
+    <label for="password2">تکرار رمز</label>
+    <input id="password2" name="password2" type="password" required minlength="6">
+    <button type="submit">ایجاد حساب</button>
+    {% if error %}<div class="err">{{ error }}</div>{% endif %}
+    <div class="alt">قبلاً ثبت‌نام کرده‌اید؟ <a href="/login">ورود</a></div>
+  </form>
+</div>
+<script src="/static/js/theme.js"></script>
+</body>
+</html>

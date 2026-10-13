@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>پشتیبانی | دیده‌بان</title>
+<script>
+(function(){try{var t=localStorage.getItem('divar_theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t);else document.documentElement.setAttribute('data-theme','dark');}catch(e){document.documentElement.setAttribute('data-theme','dark');}})();
+</script>
+<link rel="stylesheet" href="/static/css/app.css">
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#070A12">
+
+</head>
+<body>
+<div class="side-overlay" id="sideOverlay" onclick="closeSide()"></div>
+<div class="app-frame">
+  <aside class="sidebar" id="sidebar">
+    <a class="side-brand" href="/">
+      <span class="side-logo">📡</span>
+      <span><strong>دیده‌بان</strong><small>رصد هوشمند دیوار</small></span>
+    </a>
+    <nav class="side-nav">
+      <a class="side-link" href="/"><span class="ico">⌘</span> داشبورد</a>
+      <a class="side-link" href="/notifications"><span class="ico">🔔</span> اعلان‌ها</a>
+      <a class="side-link" href="/subscribe"><span class="ico">💎</span> اشتراک</a>
+      <a class="side-link active" href="/support"><span class="ico">💬</span> پشتیبانی</a>
+      <a class="side-link" href="/account"><span class="ico">👤</span> حساب</a>
+      <a class="side-link" href="/page/guide"><span class="ico">📖</span> راهنما</a>
+      {% if user is defined and user and user.role == 'admin' %}<a class="side-link" href="/admin"><span class="ico">🛠</span> مدیریت</a>{% endif %}
+    </nav>
+    <div class="side-foot">
+            <button type="button" class="theme-toggle" data-theme-toggle>
+        <span><span class="theme-ico">☀️</span> <span class="theme-lbl">تم روشن</span></span>
+      </button>
+      <a class="side-link" href="/logout"><span class="ico">⎋</span> خروج</a>
+    </div>
+  </aside>
+  <div class="main-col">
+    <div class="topbar-mobile">
+      <a class="brand-m" href="/"><span class="side-logo" style="width:32px;height:32px;font-size:.9rem;border-radius:9px">📡</span> دیده‌بان</a>
+      <button type="button" class="menu-btn" onclick="openSide()">☰</button>
+    </div>
+    <div class="content">
+
+      <div class="page-head">
+        <div class="eyebrow">Support</div>
+        <h1>پشتیبانی</h1>
+        <p>پیام بگذارید — پاسخ در همین صفحه نمایش داده می‌شود</p>
+      </div>
+      <div class="chat" id="chat"></div>
+      <div class="composer">
+        <input id="msg" placeholder="پیام خود را بنویسید..." maxlength="2000">
+        <button type="button" onclick="sendMsg()">ارسال</button>
+      </div>
+
+    </div>
+  </div>
+</div>
+<script>
+function openSide(){document.getElementById('sidebar').classList.add('open');document.getElementById('sideOverlay').classList.add('show')}
+function closeSide(){document.getElementById('sidebar').classList.remove('open');document.getElementById('sideOverlay').classList.remove('show')}
+</script>
+<script>
+const chat = document.getElementById('chat');
+async function loadChat(){
+  try {
+    const res = await fetch('/api/support/messages');
+    if (res.status === 401) { location.href = '/login'; return; }
+    const data = await res.json();
+    const list = Array.isArray(data) ? data : (data.messages || []);
+    chat.innerHTML = '';
+    if (!list.length) {
+      chat.innerHTML = '<div style="text-align:center;color:var(--text-3);padding:40px 12px;font-size:.88rem">هنوز پیامی نیست. اولین پیام را بنویسید.</div>';
+      return;
+    }
+    list.forEach(m => {
+      const d = document.createElement('div');
+      d.className = 'bubble ' + (m.sender === 'user' ? 'user' : 'admin');
+      const who = m.sender === 'user' ? 'شما' : 'پشتیبانی';
+      const time = (m.created_at || '').replace('T', ' ').slice(0, 16);
+      const text = String(m.message || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      d.innerHTML = text + '<div class="meta">' + time + ' · ' + who + '</div>';
+      chat.appendChild(d);
+    });
+    chat.scrollTop = chat.scrollHeight;
+  } catch (e) {
+    console.error(e);
+  }
+}
+async function sendMsg(){
+  const input = document.getElementById('msg');
+  const text = (input.value || '').trim();
+  if (!text) return;
+  input.value = '';
+  input.disabled = true;
+  try {
+    const res = await fetch('/api/support/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: text })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.success === false) {
+      alert(data.error || 'ارسال ناموفق بود');
+      input.value = text;
+    }
+  } catch (e) {
+    alert('خطای ارتباط');
+    input.value = text;
+  }
+  input.disabled = false;
+  input.focus();
+  await loadChat();
+}
+document.getElementById('msg').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMsg(); }
+});
+loadChat();
+setInterval(loadChat, 10000);
+</script>
+<script src="/static/js/theme.js"></script>
+<script src="/static/pwa.js" defer></script>
+</body>
+</html>

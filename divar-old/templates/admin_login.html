@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ورود مدیریت | دیده‌بان دیوار</title>
+<link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;700;800&display=swap" rel="stylesheet">
+<style>
+  *{box-sizing:border-box;}
+  body{
+    margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+    background:
+      radial-gradient(circle at 15% -10%, #2a2f45 0%, transparent 45%),
+      #1B1F30;
+    font-family:Vazirmatn,Tahoma,sans-serif;color:#fff;padding:20px;
+  }
+  .box{
+    background:#22273B;padding:34px 30px;border-radius:24px;width:min(380px,92vw);
+    box-shadow:0 20px 50px rgba(0,0,0,.45);border:1px solid rgba(255,255,255,.06);
+  }
+  .icon{
+    width:52px;height:52px;border-radius:16px;display:flex;align-items:center;justify-content:center;
+    background:linear-gradient(145deg,#6C5DD3,#5347B0);font-size:24px;margin-bottom:16px;
+  }
+  h1{margin:0 0 6px;font-size:1.35rem;}
+  p{color:#9AA5C0;margin:0 0 22px;font-size:.88rem;}
+  label{display:block;margin:14px 0 6px;font-size:.82rem;color:#9AA5C0;}
+  input{
+    width:100%;padding:13px 14px;border:1px solid rgba(255,255,255,.08);border-radius:12px;
+    background:#1B1F30;color:#fff;font-family:inherit;box-sizing:border-box;outline:none;font-size:.95rem;
+  }
+  input:focus{border-color:#6C5DD3;}
+  button{
+    width:100%;margin-top:22px;padding:14px;border:none;border-radius:12px;
+    background:linear-gradient(145deg,#6C5DD3,#5347B0);color:#fff;font-weight:700;
+    cursor:pointer;font-family:inherit;font-size:.95rem;
+  }
+  button:active{transform:translateY(1px);}
+  .err{color:#F87171;font-size:.85rem;margin-top:14px;background:rgba(248,113,113,.08);padding:10px 12px;border-radius:10px;}
+  .back{display:block;text-align:center;margin-top:20px;font-size:.8rem;color:#6C7A9C;text-decoration:none;}
+  .back:hover{color:#9AA5C0;}
+  @media (max-width:420px){
+    .box{padding:26px 20px;border-radius:18px;}
+  }
+</style>
+</head>
+<body>
+<form class="box" method="post">
+  <div class="icon">🔐</div>
+  <h1>ورود مدیریت</h1>
+  <p>این بخش فقط برای مدیران سیستم است.</p>
+
+  <label>نام کاربری مدیر</label>
+  <input name="username" autocomplete="username" required>
+
+  <label>رمز عبور</label>
+  <input name="password" type="password" autocomplete="current-password" required>
+
+  <button type="submit">ورود به پنل</button>
+
+  {% if error %}<div class="err">{{ error }}</div>{% endif %}
+
+  <a class="back" href="/login">بازگشت به ورود عادی</a>
+</form>
+</body>
+</html>

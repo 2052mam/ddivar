@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ورود | دیده‌بان</title>
+<script>
+(function(){try{var t=localStorage.getItem('divar_theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t);else document.documentElement.setAttribute('data-theme','dark');}catch(e){document.documentElement.setAttribute('data-theme','dark');}})();
+</script>
+<link rel="stylesheet" href="/static/css/app.css">
+<meta name="theme-color" content="#070A12">
+</head>
+<body>
+<button type="button" class="theme-toggle" data-theme-toggle style="position:fixed;top:16px;left:16px;z-index:5;width:auto;padding:8px 12px"><span class="theme-ico">☀️</span> <span class="theme-lbl">تم روشن</span></button>
+<div class="auth-page">
+  <form class="auth-card" method="post">
+    <div class="mark">📡</div>
+    <h1>ورود به کنسول</h1>
+    <p class="lead">به مرکز رصد آگهی‌های دیوار خوش آمدید</p>
+    <label for="username">نام کاربری</label>
+    <input id="username" name="username" autocomplete="username" required>
+    <label for="password">رمز عبور</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" required>
+    <button type="submit">ورود</button>
+    {% if error %}<div class="err">{{ error }}</div>{% endif %}
+    <div class="alt">حساب ندارید؟ <a href="/register">ثبت‌نام رایگان</a></div>
+  </form>
+</div>
+<script src="/static/js/theme.js"></script>
+</body>
+</html>

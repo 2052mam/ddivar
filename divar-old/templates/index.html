@@ -1,0 +1,904 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>دیده‌بان دیوار | مانیتور موبایل و خودرو</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+<script>
+(function(){try{var t=localStorage.getItem('divar_theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t);else document.documentElement.setAttribute('data-theme','dark');}catch(e){document.documentElement.setAttribute('data-theme','dark');}})();
+</script>
+<link rel="stylesheet" href="/static/css/app.css">
+<style>
+#smartProfileBox,#smartScoreBox{margin-top:10px}
+.chip-group,.field .chip-group{display:flex;flex-wrap:wrap;gap:4px;margin-top:4px}
+.field > label{margin-bottom:8px}
+.normal-filters .field{margin-bottom:12px}
+</style>
+
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#2EE6A6">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="دیده‌بان">
+<link rel="apple-touch-icon" href="/static/icons/icon-192.png">
+</head>
+<body>
+<div class="side-overlay" id="sideOverlay" onclick="closeSide()"></div>
+<div class="app-frame">
+  <aside class="sidebar" id="sidebar">
+    <a class="side-brand" href="/">
+      <span class="side-logo">📡</span>
+      <span>
+        <strong>دیده‌بان</strong>
+        <small>رصد هوشمند دیوار</small>
+      </span>
+    </a>
+    <nav class="side-nav">
+      <a class="side-link active" href="/" data-nav="home"><span class="ico">⌘</span> داشبورد</a>
+      <a class="side-link" href="/notifications" id="navNotifLink"><span class="ico">🔔</span> اعلان‌ها <span class="pill" id="navNotifBadge">0</span></a>
+      <a class="side-link" href="/subscribe"><span class="ico">💎</span> اشتراک</a>
+      <a class="side-link" href="/support"><span class="ico">💬</span> پشتیبانی</a>
+      <a class="side-link" href="/account"><span class="ico">👤</span> حساب کاربری</a>
+      <a class="side-link" href="/page/guide"><span class="ico">📖</span> راهنما</a>
+      {% if user.role == 'admin' %}<a class="side-link" href="/admin"><span class="ico">🛠</span> مدیریت</a>{% endif %}
+    </nav>
+    <div class="side-foot">
+      <div class="side-user">
+        <span class="av">{{ user.username[:1]|upper if user and user.username else 'U' }}</span>
+        <div>
+          <div style="font-weight:700;color:var(--text)">{{ user.username if user else '' }}</div>
+          <div style="font-size:.7rem">{% if sub_active %}اشتراک فعال{% else %}بدون اشتراک{% endif %}</div>
+        </div>
+      </div>
+            <button type="button" class="theme-toggle" data-theme-toggle>
+        <span><span class="theme-ico">☀️</span> <span class="theme-lbl">تم روشن</span></span>
+      </button>
+      <a class="side-link" href="/logout" style="margin-top:8px"><span class="ico">⎋</span> خروج</a>
+    </div>
+  </aside>
+
+  <div class="main-col">
+    <div class="topbar-mobile">
+      <a class="brand-m" href="/"><span class="side-logo" style="width:32px;height:32px;font-size:.9rem;border-radius:9px">📡</span> دیده‌بان</a>
+      <button type="button" class="menu-btn" onclick="openSide()" aria-label="منو">☰</button>
+    </div>
+
+    <div class="content">
+      <div class="page-head">
+        <div class="eyebrow">◆ Command Center</div>
+        <h1>آگهی‌های خوب را <span>زودتر</span> شکار کنید</h1>
+        <p>جستجوی هوشمند، مانیتور ۲۴ ساعته و اعلان لحظه‌ای برای موبایل، خودرو و املاک</p>
+      </div>
+
+      <div class="stats-row">
+        <div class="stat-card"><div class="lbl">وضعیت اشتراک</div><div class="val {% if sub_active %}cyan{% else %}amber{% endif %}">{% if sub_active %}فعال{% else %}منقضی{% endif %}</div></div>
+        <div class="stat-card"><div class="lbl">سقف مانیتور</div><div class="val">{{ user.max_monitors if user else '—' }}</div></div>
+        <div class="stat-card"><div class="lbl">پلن</div><div class="val" style="font-size:1rem">{{ user.plan if user else '—' }}</div></div>
+        <div class="stat-card"><div class="lbl">اعلان‌ها</div><div class="val cyan" id="statUnread">—</div></div>
+      </div>
+
+<nav class="console-tabs">
+    <button class="console-tab active" data-page="search">🔍 جستجو</button>
+    <button class="console-tab" data-page="monitors">📡 مانیتورها</button>
+    <button class="console-tab" data-page="history">🕘 تاریخچه</button>
+  </nav>
+
+  <div id="page-search" class="page-section active">
+    <div class="sub-lock" id="subLockBanner">
+      <span>⚠️ اشتراک شما فعال نیست. برای جستجو و مانیتور باید اشتراک بخرید یا تمدید کنید.</span>
+      <a href="/subscribe">خرید / تمدید اشتراک</a>
+    </div>
+
+    <div class="category-switch">
+      <button id="tab-mobile" class="cat-btn active">📱 موبایل</button>
+      <button id="tab-car" class="cat-btn">🚗 خودرو</button>
+      <button id="tab-re-sell" class="cat-btn">🏠 فروش مسکونی</button>
+      <button id="tab-re-rent" class="cat-btn">🔑 اجاره مسکونی</button>
+    </div>
+
+    <div class="panel filter-panel">
+      <div class="module module-smart">
+        <label class="switch-row" for="smart_search">
+          <span class="switch-label"><strong>جستجوی هوشمند</strong><small>رتبه‌بندی چندبعدی: قیمت بازار · تازگی · کیفیت متن · فروشنده · ریسک</small></span>
+          <span class="neo-switch"><input type="checkbox" id="smart_search"><span class="knob"></span></span>
+        </label>
+        <div class="days-input" id="smartProfileBox" style="flex-wrap:wrap;gap:8px;">
+          <label for="smart_profile" style="margin:0;">حالت:</label>
+          <select id="smart_profile" class="neo-select" style="min-width:140px;">
+            <option value="conservative">محافظه‌کار — فقط فرصت قوی (امتیاز≥۵۵)</option>
+            <option value="balanced" selected>متعادل — پیشنهاد سیستم (امتیاز≥۴۲)</option>
+            <option value="open">باز — پوشش بیشتر (امتیاز≥۳۰)</option>
+          </select>
+        </div>
+        <div class="days-input" id="smartScoreBox">
+          <label for="min_smart_score" style="margin:0;">حداقل امتیاز:</label>
+          <input type="number" id="min_smart_score" class="neo-input" value="42" min="1" max="100" step="1">
+          <span style="font-size:.75rem;color:var(--text-3);">محافظه‌کار≈۵۵ · متعادل≈۴۲ · باز≈۳۰</span>
+        </div>
+      </div>
+
+      <div class="module module-avg">
+        <label class="switch-row" for="smart_avg">
+          <span class="switch-label"><strong>میانگین قیمت هوشمند</strong><small>مقایسه هر آگهی با میانگین بازار</small></span>
+          <span class="neo-switch"><input type="checkbox" id="smart_avg"><span class="knob"></span></span>
+        </label>
+        <div class="days-input">
+          <label for="smart_days" style="margin:0;">تعداد روز:</label>
+          <input type="number" id="smart_days" class="neo-input" value="3" min="1" max="30">
+        </div>
+      </div>
+
+      <div class="module module-keyword">
+        <label for="keywords" style="color:#9c7415;">🔑 کلمات کلیدی</label>
+        <input type="text" id="keywords" class="neo-input" placeholder="پلمپ, بدون رنگ, موتور سالم, گارانتی">
+        <small>با ویرگول جدا کنید — آگهی‌های دارای این کلمات اولویت می‌گیرند</small>
+      </div>
+
+      <div class="module module-negative">
+        <label for="negative_keywords" style="color:#C22448;">🚫 کلمات منفی (حذف قطعی)</label>
+        <input type="text" id="negative_keywords" class="neo-input" placeholder="اقساط, تعمیری, شکسته, سالم نیست, تعویض">
+        <small>اگر این کلمات باشد آگهی حذف می‌شود (حتی اگر کلمه کلیدی مثبت داشته باشد)</small>
+      </div>
+
+      <hr class="split">
+
+      <div class="field-grid">
+        <div class="field">
+          <label for="city">شهر</label>
+          <select id="city" class="neo-select">
+            <option value="5" selected>تبریز</option>
+            <option value="1">تهران</option>
+            <option value="3">مشهد</option>
+            <option value="2">کرج</option>
+            <option value="4">اصفهان</option>
+            <option value="6">شیراز</option>
+            <option value="7">اهواز</option>
+            <option value="8">قم</option>
+            <option value="9">کرمانشاه</option>
+            <option value="10">ارومیه</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="recent_ads">زمان آگهی</label>
+          <select id="recent_ads" class="neo-select">
+            <option value="all" selected>همه آگهی‌ها (بدون محدودیت زمانی)</option>
+            <option value="3h">۳ ساعت</option>
+            <option value="1d">۲۴ ساعت</option>
+            <option value="2d">۲ روز</option>
+            <option value="7d">۱ هفته</option>
+          </select>
+        </div>
+        <div class="field" id="businessTypeBox">
+          <label for="business_type">نوع آگهی‌دهنده</label>
+          <select id="business_type" class="neo-select">
+            <option value="ALL" selected>همه</option>
+            <option value="personal">شخصی</option>
+            <option value="marketplace">فروشگاه</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- فیلتر موبایل -->
+      <div class="normal-filters" id="mobileFilters">
+        <hr class="split">
+        <div class="field-grid">
+          <div class="field"><label for="min_price_mobile">حداقل قیمت</label><input type="number" id="min_price_mobile" class="neo-input" value="1000000"></div>
+          <div class="field"><label for="max_price_mobile">حداکثر قیمت</label><input type="number" id="max_price_mobile" class="neo-input" value="900000000"></div>
+          <div class="field">
+            <label for="sort_mobile">مرتب‌سازی</label>
+            <select id="sort_mobile" class="neo-select">
+              <option value="sort_date" selected>جدیدترین</option>
+              <option value="cheapest">ارزان‌ترین</option>
+              <option value="most_expensive">گران‌ترین</option>
+            </select>
+          </div>
+        </div>
+        <div class="check-row-flex">
+          <label class="plain-check"><input type="checkbox" id="has_photo_mobile"><span>عکس‌دار</span></label>
+          <label class="plain-check"><input type="checkbox" id="has_installment_mobile"><span>اقساطی</span></label>
+        </div>
+        <div class="chip-group-wrap">
+          <label>وضعیت</label>
+          <div class="chip-group">
+            <label class="chip-check"><input class="status-check" type="checkbox" value="new"><span>نو</span></label>
+            <label class="chip-check"><input class="status-check" type="checkbox" value="like-new"><span>در حد نو</span></label>
+            <label class="chip-check"><input class="status-check" type="checkbox" value="used"><span>کارکرده</span></label>
+            <label class="chip-check"><input class="status-check" type="checkbox" value="repair-needed"><span>نیاز به تعمیر</span></label>
+          </div>
+        </div>
+        <div class="chip-group-wrap">
+          <label>تعداد سیم‌کارت</label>
+          <div class="chip-group">
+            <label class="chip-check"><input class="sim-check" type="checkbox" value="1"><span>تک سیم</span></label>
+            <label class="chip-check"><input class="sim-check" type="checkbox" value="2"><span>دو سیم</span></label>
+            <label class="chip-check"><input class="sim-check" type="checkbox" value="+3"><span>۳ یا بیشتر</span></label>
+          </div>
+        </div>
+        <div class="chip-group-wrap">
+          <label>رم</label>
+          <div class="chip-group">
+            <label class="chip-check"><input class="ram-check" type="checkbox" value="4GB"><span>4GB</span></label>
+            <label class="chip-check"><input class="ram-check" type="checkbox" value="6GB"><span>6GB</span></label>
+            <label class="chip-check"><input class="ram-check" type="checkbox" value="8GB"><span>8GB</span></label>
+            <label class="chip-check"><input class="ram-check" type="checkbox" value="12GB"><span>12GB</span></label>
+            <label class="chip-check"><input class="ram-check" type="checkbox" value="16GB"><span>16GB</span></label>
+            <label class="chip-check"><input class="ram-check" type="checkbox" value="18GB"><span>18GB</span></label>
+          </div>
+        </div>
+        <div class="chip-group-wrap">
+          <label>حافظه داخلی</label>
+          <div class="chip-group">
+            <label class="chip-check"><input class="storage-check" type="checkbox" value="64GB"><span>64GB</span></label>
+            <label class="chip-check"><input class="storage-check" type="checkbox" value="128GB"><span>128GB</span></label>
+            <label class="chip-check"><input class="storage-check" type="checkbox" value="256GB"><span>256GB</span></label>
+            <label class="chip-check"><input class="storage-check" type="checkbox" value="512GB"><span>512GB</span></label>
+            <label class="chip-check"><input class="storage-check" type="checkbox" value="1TB"><span>1TB</span></label>
+          </div>
+        </div>
+        <div class="chip-group-wrap">
+          <label>رنگ</label>
+          <div class="chip-group">
+            <label class="chip-check"><input class="color-check-mobile" type="checkbox" value="مشکی"><span>مشکی</span></label>
+            <label class="chip-check"><input class="color-check-mobile" type="checkbox" value="سفید"><span>سفید</span></label>
+            <label class="chip-check"><input class="color-check-mobile" type="checkbox" value="آبی"><span>آبی</span></label>
+            <label class="chip-check"><input class="color-check-mobile" type="checkbox" value="طلایی"><span>طلایی</span></label>
+            <label class="chip-check"><input class="color-check-mobile" type="checkbox" value="نقره‌ای"><span>نقره‌ای</span></label>
+            <label class="chip-check"><input class="color-check-mobile" type="checkbox" value="خاکستری"><span>خاکستری</span></label>
+            <label class="chip-check"><input class="color-check-mobile" type="checkbox" value="صورتی"><span>صورتی</span></label>
+            <label class="chip-check"><input class="color-check-mobile" type="checkbox" value="سبز"><span>سبز</span></label>
+            <label class="chip-check"><input class="color-check-mobile" type="checkbox" value="سایر"><span>سایر</span></label>
+          </div>
+        </div>
+      </div>
+
+      <!-- فیلتر خودرو -->
+      <div class="normal-filters" id="carFilters" style="display:none;">
+        <hr class="split">
+        <div class="field-grid">
+          <div class="field"><label for="min_price_car">حداقل قیمت</label><input type="number" id="min_price_car" class="neo-input" value="100000000"></div>
+          <div class="field"><label for="max_price_car">حداکثر قیمت</label><input type="number" id="max_price_car" class="neo-input" value="5000000000"></div>
+          <div class="field"><label for="year_min">سال از</label><input type="number" id="year_min" class="neo-input" value="1300" placeholder="بدون محدودیت"></div>
+          <div class="field"><label for="year_max">سال تا</label><input type="number" id="year_max" class="neo-input" value="1405" placeholder="بدون محدودیت"></div>
+          <div class="field"><label for="usage_min">کارکرد از</label><input type="number" id="usage_min" class="neo-input" value="0"></div>
+          <div class="field"><label for="usage_max">کارکرد تا</label><input type="number" id="usage_max" class="neo-input" value="10000000" placeholder="بدون محدودیت"></div>
+          <div class="field">
+            <label for="sort_car">مرتب‌سازی</label>
+            <select id="sort_car" class="neo-select">
+              <option value="sort_date" selected>جدیدترین</option>
+              <option value="cheapest">ارزان‌ترین</option>
+              <option value="most_expensive">گران‌ترین</option>
+            </select>
+          </div>
+        </div>
+        <div class="check-row-flex">
+          <label class="plain-check"><input type="checkbox" id="has_photo_car"><span>عکس‌دار</span></label>
+          <label class="plain-check"><input type="checkbox" id="has_video_car"><span>ویدیو</span></label>
+          <label class="plain-check"><input type="checkbox" id="has_installment_car"><span>اقساطی</span></label>
+        </div>
+        <div class="chip-group-wrap">
+          <label>وضعیت بدنه</label>
+          <div class="chip-group">
+            <label class="chip-check"><input class="body-check" type="checkbox" value="intact"><span>سالم</span></label>
+            <label class="chip-check"><input class="body-check" type="checkbox" value="some-scratches"><span>خط و خش</span></label>
+            <label class="chip-check"><input class="body-check" type="checkbox" value="one-spot-paint"><span>یک لکه رنگ</span></label>
+            <label class="chip-check"><input class="body-check" type="checkbox" value="some-paint"><span>چند لکه رنگ</span></label>
+            <label class="chip-check"><input class="body-check" type="checkbox" value="full-paint"><span>تمام‌رنگ</span></label>
+            <label class="chip-check"><input class="body-check" type="checkbox" value="accidental"><span>تصادفی</span></label>
+          </div>
+        </div>
+        <div class="chip-group-wrap">
+          <label>وضعیت شاسی</label>
+          <div class="chip-group">
+            <label class="chip-check"><input class="chassis-check" type="checkbox" value="both-healthy"><span>هر دو سالم</span></label>
+            <label class="chip-check"><input class="chassis-check" type="checkbox" value="front-damage"><span>جلو ضربه</span></label>
+            <label class="chip-check"><input class="chassis-check" type="checkbox" value="back-damage"><span>عقب ضربه</span></label>
+            <label class="chip-check"><input class="chassis-check" type="checkbox" value="both-damage"><span>هر دو ضربه</span></label>
+          </div>
+        </div>
+        <div class="chip-group-wrap">
+          <label>موتور / گیربکس</label>
+          <div class="chip-group">
+            <label class="chip-check"><input class="motor-check" type="checkbox" value="healthy"><span>موتور سالم</span></label>
+            <label class="chip-check"><input class="motor-check" type="checkbox" value="needs-repair"><span>نیاز به تعمیر</span></label>
+            <label class="chip-check"><input class="gearbox-check" type="checkbox" value="manual"><span>دستی</span></label>
+            <label class="chip-check"><input class="gearbox-check" type="checkbox" value="automatic"><span>اتومات</span></label>
+          </div>
+        </div>
+      </div>
+
+      
+      <div id="reFilters" style="display:none;margin-top:12px;">
+        <div class="grid-2" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;">
+          <div id="reSellPriceBox">
+            <label>حداقل قیمت (تومان)</label>
+            <input type="number" id="re_min_price" class="neo-input" placeholder="مثلا 3000000000">
+          </div>
+          <div id="reSellPriceBox2">
+            <label>حداکثر قیمت (تومان)</label>
+            <input type="number" id="re_max_price" class="neo-input" placeholder="مثلا 15000000000">
+          </div>
+          <div id="reRentBox" style="display:none;">
+            <label>حداقل اجاره</label>
+            <input type="number" id="re_min_rent" class="neo-input" placeholder="اجاره ماهانه">
+          </div>
+          <div id="reRentBox2" style="display:none;">
+            <label>حداکثر اجاره</label>
+            <input type="number" id="re_max_rent" class="neo-input">
+          </div>
+          <div id="reCreditBox" style="display:none;">
+            <label>حداقل ودیعه</label>
+            <input type="number" id="re_min_credit" class="neo-input">
+          </div>
+          <div id="reCreditBox2" style="display:none;">
+            <label>حداکثر ودیعه</label>
+            <input type="number" id="re_max_credit" class="neo-input">
+          </div>
+          <div>
+            <label>متراژ از</label>
+            <input type="number" id="re_size_min" class="neo-input" placeholder="مثلا 60">
+          </div>
+          <div>
+            <label>متراژ تا</label>
+            <input type="number" id="re_size_max" class="neo-input" placeholder="مثلا 150">
+          </div>
+          <div>
+            <label>سن بنا از (سال)</label>
+            <input type="number" id="re_age_min" class="neo-input" min="0">
+          </div>
+          <div>
+            <label>سن بنا تا</label>
+            <input type="number" id="re_age_max" class="neo-input" min="0">
+          </div>
+          <div>
+            <label>طبقه از</label>
+            <input type="number" id="re_floor_min" class="neo-input">
+          </div>
+          <div>
+            <label>طبقه تا</label>
+            <input type="number" id="re_floor_max" class="neo-input">
+          </div>
+        </div>
+        <div style="margin-top:12px;">
+          <label>تعداد اتاق</label>
+          <div class="model-row">
+            <div class="model-check"><label><input type="checkbox" class="re-room" value="بدون اتاق"><span>بدون اتاق</span></label></div>
+            <div class="model-check"><label><input type="checkbox" class="re-room" value="یک"><span>یک</span></label></div>
+            <div class="model-check"><label><input type="checkbox" class="re-room" value="دو"><span>دو</span></label></div>
+            <div class="model-check"><label><input type="checkbox" class="re-room" value="سه"><span>سه</span></label></div>
+            <div class="model-check"><label><input type="checkbox" class="re-room" value="چهار"><span>چهار</span></label></div>
+            <div class="model-check"><label><input type="checkbox" class="re-room" value="بیشتر"><span>بیشتر</span></label></div>
+          </div>
+        </div>
+        <div id="reDeedBox" style="margin-top:10px;">
+          <label>نوع سند (فروش)</label>
+          <div class="model-row">
+            <div class="model-check"><label><input type="checkbox" class="re-deed" value="single_page"><span>تک‌برگ</span></label></div>
+            <div class="model-check"><label><input type="checkbox" class="re-deed" value="multi_page"><span>منگوله‌دار</span></label></div>
+            <div class="model-check"><label><input type="checkbox" class="re-deed" value="written_agreement"><span>قولنامه‌ای</span></label></div>
+          </div>
+        </div>
+        <div style="margin-top:12px;display:flex;flex-wrap:wrap;gap:12px;">
+          <label class="model-check"><input type="checkbox" id="re_parking"><span>پارکینگ</span></label>
+          <label class="model-check"><input type="checkbox" id="re_elevator"><span>آسانسور</span></label>
+          <label class="model-check"><input type="checkbox" id="re_warehouse"><span>انباری</span></label>
+          <label class="model-check"><input type="checkbox" id="re_balcony"><span>بالکن</span></label>
+        </div>
+      </div>
+
+<div class="models-section" id="modelsSection">
+        <label>مدل‌ها (آکاردئون برند)</label>
+        <div class="models-group" id="mobileModelsBox">
+          {% for brand, model_list in mobile_models.items() %}
+          <div class="brand-acc" data-brand="{{ brand }}">
+            <div class="brand-acc-head" onclick="toggleBrandAcc(this)">
+              <div class="left"><span class="chev">▶</span> {{ brand|upper }} <small style="opacity:.6;font-weight:500">({{ model_list|length }})</small></div>
+              <button type="button" class="select-all" onclick="event.stopPropagation(); selectAllBrand(this, 'mobile')">انتخاب همه</button>
+            </div>
+            <div class="brand-acc-body">
+              <div class="model-row">
+                {% for model in model_list %}
+                <div class="model-check">
+                  <label><input type="checkbox" class="model-check-mobile" value="{{ model }}"><span>{{ model }}</span></label>
+                </div>
+                {% endfor %}
+              </div>
+            </div>
+          </div>
+          {% endfor %}
+        </div>
+        <div class="models-group" id="carModelsBox" style="display:none;">
+          {% for brand, model_list in car_models.items() %}
+          <div class="brand-acc" data-brand="{{ brand }}">
+            <div class="brand-acc-head" onclick="toggleBrandAcc(this)">
+              <div class="left"><span class="chev">▶</span> {{ brand|upper }} <small style="opacity:.6;font-weight:500">({{ model_list|length }})</small></div>
+              <button type="button" class="select-all" onclick="event.stopPropagation(); selectAllBrand(this, 'car')">انتخاب همه</button>
+            </div>
+            <div class="brand-acc-body">
+              <div class="model-row">
+                {% for model in model_list %}
+                <div class="model-check">
+                  <label><input type="checkbox" class="model-check-car" value="{{ model }}"><span>{{ model }}</span></label>
+                </div>
+                {% endfor %}
+              </div>
+            </div>
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+
+      <div class="actions">
+        <button id="searchBtn" class="btn-neo btn-primary-neo">جستجو کن</button>
+        <button id="saveMonitorBtn" class="btn-neo btn-secondary-neo">ذخیره به‌عنوان مانیتور</button>
+      </div>
+    </div>
+
+    <div id="resultCount" class="result-count" style="display:none;"></div>
+    <div id="loading" class="loading-radar" style="display:none;">
+      <div class="radar"><div class="ring r1"></div><div class="ring r2"></div><div class="ring r3"></div><div class="dot"></div></div>
+      <p>در حال جستجو...</p>
+    </div>
+    <div id="results" class="results-grid"></div>
+  </div>
+
+  <div id="page-monitors" class="page-section">
+    <div class="section-head">
+      <h2>مانیتورهای فعال</h2>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <button class="btn-ghost-neo" id="testEmailBtn">تست ایمیل</button>
+        <button class="btn-ghost-neo" id="testTelegramBtn">تست تلگرام</button>
+      </div>
+    </div>
+    <div id="monitorsList" class="monitor-grid"></div>
+    <div id="monitorsEmpty" class="empty-state" style="display:none;">
+      <h5>هنوز مانیتوری نساختی</h5>
+      از صفحه جستجو، فیلترها را تنظیم کن و «ذخیره به‌عنوان مانیتور» را بزن.
+    </div>
+  </div>
+
+  <div id="page-history" class="page-section">
+    <div class="section-head">
+      <h2>تاریخچه آگهی‌های پیدا‌شده</h2>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn-ghost-neo" id="refreshHistoryBtn">بروزرسانی</button>
+        <button class="btn-ghost-neo" id="clearHistoryBtn" style="border-color:var(--rose);color:var(--rose)">🗑 پاکسازی تاریخچه</button>
+      </div>
+    </div>
+    <div class="panel table-panel">
+      <table class="history-table">
+        <thead>
+          <tr><th>زمان</th><th>مانیتور</th><th>عنوان</th><th>قیمت</th><th>کلمات</th><th></th></tr>
+        </thead>
+        <tbody id="historyBody"></tbody>
+      </table>
+    </div>
+    <div id="historyEmpty" class="empty-state" style="display:none;">هنوز موردی ثبت نشده</div>
+  </div>
+</div>
+
+<script>
+
+function toggleBrandAcc(head){
+  const acc = head.closest('.brand-acc');
+  acc.classList.toggle('open');
+}
+function selectAllBrand(btn, kind){
+  const acc = btn.closest('.brand-acc');
+  const boxes = acc.querySelectorAll(kind==='mobile' ? '.model-check-mobile' : '.model-check-car');
+  const allOn = Array.from(boxes).every(b=>b.checked);
+  boxes.forEach(b=> b.checked = !allOn);
+  btn.textContent = allOn ? 'انتخاب همه' : 'برداشتن همه';
+}
+let currentCategory = "mobile";
+
+document.querySelectorAll('[data-page]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('[data-page]').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    document.querySelectorAll('.page-section').forEach(p => p.classList.remove('active'));
+    document.getElementById('page-' + btn.dataset.page).classList.add('active');
+    if (btn.dataset.page === 'monitors') loadMonitors();
+    if (btn.dataset.page === 'history') loadHistory();
+  });
+});
+
+
+function setCategory(cat){
+  currentCategory = cat;
+  document.querySelectorAll('.cat-btn').forEach(b=>b.classList.remove('active'));
+  const map = {
+    'mobile':'tab-mobile','car':'tab-car',
+    'apartment-sell':'tab-re-sell','apartment-rent':'tab-re-rent'
+  };
+  const btn = document.getElementById(map[cat]);
+  if(btn) btn.classList.add('active');
+  const isMobile = cat==='mobile';
+  const isCar = cat==='car';
+  const isRE = cat==='apartment-sell' || cat==='apartment-rent';
+  const mf = document.getElementById('mobileFilters');
+  const cf = document.getElementById('carFilters');
+  if(mf) mf.style.display = isMobile ? '' : 'none';
+  if(cf) cf.style.display = isCar ? '' : 'none';
+  const mb = document.getElementById('mobileModelsBox');
+  const cb = document.getElementById('carModelsBox');
+  const ms = document.getElementById('modelsSection');
+  if(mb) mb.style.display = isMobile ? '' : 'none';
+  if(cb) cb.style.display = isCar ? '' : 'none';
+  if(ms) ms.style.display = isRE ? 'none' : '';
+  const rf = document.getElementById('reFilters');
+  if(rf) rf.style.display = isRE ? '' : 'none';
+  const sell = cat==='apartment-sell';
+  ['reSellPriceBox','reSellPriceBox2','reDeedBox'].forEach(id=>{
+    const el=document.getElementById(id); if(el) el.style.display = (isRE && sell) ? '' : 'none';
+  });
+  ['reRentBox','reRentBox2','reCreditBox','reCreditBox2'].forEach(id=>{
+    const el=document.getElementById(id); if(el) el.style.display = (isRE && !sell) ? '' : 'none';
+  });
+}
+document.getElementById('tab-mobile').addEventListener('click', () => setCategory('mobile'));
+document.getElementById('tab-car').addEventListener('click', () => setCategory('car'));
+document.getElementById('tab-re-sell').addEventListener('click', () => setCategory('apartment-sell'));
+document.getElementById('tab-re-rent').addEventListener('click', () => setCategory('apartment-rent'));
+
+
+const SUB_ACTIVE = {{ 'true' if sub_active else 'false' }};
+function applySubLock(){
+  const banner = document.getElementById('subLockBanner');
+  if (!banner) return;
+  if (!SUB_ACTIVE) {
+    banner.style.display = 'flex';
+    const sb = document.getElementById('searchBtn');
+    const mb = document.getElementById('saveMonitorBtn');
+    if (sb) { sb.disabled = true; sb.title = 'اشتراک فعال نیست'; }
+    if (mb) { mb.disabled = true; }
+  } else {
+    banner.style.display = 'none';
+  }
+}
+document.addEventListener('DOMContentLoaded', applySubLock);
+const smartSearch = document.getElementById('smart_search');
+const smartAvg = document.getElementById('smart_avg');
+const normalFilters = document.querySelectorAll('.normal-filters');
+smartSearch.addEventListener('change', function () {
+  if (this.checked) { smartAvg.checked = false; normalFilters.forEach(e => e.classList.add('disabled-section')); }
+  else normalFilters.forEach(e => e.classList.remove('disabled-section'));
+});
+smartAvg.addEventListener('change', function () {
+  if (this.checked) { smartSearch.checked = false; normalFilters.forEach(e => e.classList.remove('disabled-section')); }
+});
+(function syncSmartProfileDefaults() {
+  const profileEl = document.getElementById('smart_profile');
+  const scoreEl = document.getElementById('min_smart_score');
+  if (!profileEl || !scoreEl) return;
+  const defaults = { conservative: 55, balanced: 42, open: 30 };
+  profileEl.addEventListener('change', function () {
+    scoreEl.value = defaults[this.value] || 42;
+  });
+})();
+
+function getChecked(sel) {
+  return Array.from(document.querySelectorAll(sel + ':checked')).map(c => c.value);
+}
+
+function buildSettings() {
+  const isMobile = currentCategory === 'mobile';
+  const isCar = currentCategory === 'car';
+  const isRE = currentCategory === 'apartment-sell' || currentCategory === 'apartment-rent';
+  const settings = {
+    category: currentCategory,
+    city: document.getElementById('city').value,
+    recent_ads: document.getElementById('recent_ads').value,
+    models: isMobile ? getChecked('.model-check-mobile') : (isCar ? getChecked('.model-check-car') : []),
+    smart_search: smartSearch.checked,
+    smart_avg: smartAvg.checked,
+    smart_days: document.getElementById('smart_days').value,
+    smart_profile: (document.getElementById('smart_profile') || {}).value || 'balanced',
+    min_smart_score: document.getElementById('min_smart_score').value,
+    keywords: document.getElementById('keywords').value,
+    negative_keywords: document.getElementById('negative_keywords').value,
+    business_type: document.getElementById('business_type').value,
+  };
+  if (isRE) {
+    settings.sort = 'sort_date';
+    settings.has_photo = false;
+    settings.min_price = document.getElementById('re_min_price')?.value || '';
+    settings.max_price = document.getElementById('re_max_price')?.value || '';
+    settings.min_rent = document.getElementById('re_min_rent')?.value || '';
+    settings.max_rent = document.getElementById('re_max_rent')?.value || '';
+    settings.min_credit = document.getElementById('re_min_credit')?.value || '';
+    settings.max_credit = document.getElementById('re_max_credit')?.value || '';
+    settings.size_min = document.getElementById('re_size_min')?.value || '';
+    settings.size_max = document.getElementById('re_size_max')?.value || '';
+    settings.building_age_min = document.getElementById('re_age_min')?.value || '';
+    settings.building_age_max = document.getElementById('re_age_max')?.value || '';
+    settings.floor_min = document.getElementById('re_floor_min')?.value || '';
+    settings.floor_max = document.getElementById('re_floor_max')?.value || '';
+    settings.rooms = getChecked('.re-room');
+    settings.deed_type = getChecked('.re-deed');
+    settings.parking = !!document.getElementById('re_parking')?.checked;
+    settings.elevator = !!document.getElementById('re_elevator')?.checked;
+    settings.warehouse = !!document.getElementById('re_warehouse')?.checked;
+    settings.balcony = !!document.getElementById('re_balcony')?.checked;
+  } else if (isMobile) {
+    settings.sort = document.getElementById('sort_mobile').value;
+    settings.has_photo = document.getElementById('has_photo_mobile').checked;
+    settings.has_installment = document.getElementById('has_installment_mobile').checked;
+    settings.min_price = document.getElementById('min_price_mobile').value;
+    settings.max_price = document.getElementById('max_price_mobile').value;
+    settings.status = getChecked('.status-check');
+    settings.sim_card_slot = getChecked('.sim-check');
+    settings.ram_memory = getChecked('.ram-check');
+    settings.internal_storage = getChecked('.storage-check');
+    settings.base_color = getChecked('.color-check-mobile');
+  } else {
+    settings.sort = document.getElementById('sort_car').value;
+    settings.has_photo = document.getElementById('has_photo_car').checked;
+    settings.has_installment = document.getElementById('has_installment_car').checked;
+    settings.min_price = document.getElementById('min_price_car').value;
+    settings.max_price = document.getElementById('max_price_car').value;
+    settings.has_video = document.getElementById('has_video_car').checked;
+    settings.year_min = document.getElementById('year_min').value;
+    settings.year_max = document.getElementById('year_max').value;
+    settings.usage_min = document.getElementById('usage_min').value;
+    settings.usage_max = document.getElementById('usage_max').value;
+    settings.body_status = getChecked('.body-check');
+    settings.chassis_status = getChecked('.chassis-check');
+    settings.motor_status = getChecked('.motor-check');
+    settings.gearbox = getChecked('.gearbox-check');
+  }
+  return settings;
+}
+
+document.getElementById('searchBtn').addEventListener('click', async () => {
+  const btn = document.getElementById('searchBtn');
+  const loading = document.getElementById('loading');
+  const results = document.getElementById('results');
+  const resultCount = document.getElementById('resultCount');
+  btn.disabled = true;
+  loading.style.display = 'block';
+  results.innerHTML = '';
+  resultCount.style.display = 'none';
+  try {
+    const res = await fetch('/search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(buildSettings())
+    });
+    if (res.status === 401) { window.location.href = '/login'; return; }
+    const data = await res.json();
+    if (res.status === 402) {
+      const go = data.redirect || '/subscribe';
+
+      results.innerHTML = '<div class="empty-state error" style="grid-column:1/-1;"><h5>اشتراک غیرفعال</h5>' + (data.message || '') + '<br><br><a href="'+(data.redirect||'/subscribe')+'">خرید / تمدید اشتراک</a></div>';
+      loading.style.display = 'none'; btn.disabled = false; return;
+    }
+    if (res.status === 429) {
+      results.innerHTML = '<div class="empty-state" style="grid-column:1/-1;"><h5>کمی صبر کن</h5>' + (data.message || '') + '</div>';
+      loading.style.display = 'none'; btn.disabled = false; return;
+    }
+    if (data.success && data.ads && data.ads.length) {
+      resultCount.style.display = 'flex';
+      let t = `تعداد: <strong>${data.count}</strong>`;
+      if (data.smart_search_enabled) {
+        t += ' <span class="badge-neo badge-smart">✨ هوشمند</span>';
+        const sf = data.smart_filter || {};
+        const prof = data.smart_profile || sf.profile || '';
+        const mn = data.min_smart_score != null ? data.min_smart_score : sf.min_score;
+        if (prof) t += ` <span class="badge-neo">حالت: ${prof}</span>`;
+        if (mn != null) t += ` <span class="badge-neo">حداقل امتیاز: ${mn}</span>`;
+        if (sf.before != null && sf.after != null && sf.before !== sf.after) {
+          t += ` <span class="badge-neo badge-avg">فیلتر ${sf.before}→${sf.after}</span>`;
+        }
+      }
+      if (data.smart_avg_enabled) t += ' <span class="badge-neo badge-avg">📊 میانگین</span>';
+      resultCount.innerHTML = t;
+      data.ads.forEach((ad, i) => {
+        const badges = [];
+        if (ad.is_nardeban) badges.push('<span class="badge-neo badge-nardeban">🚀 نردبان</span>');
+        if (ad.is_shop) badges.push('<span class="badge-neo badge-shop">🏪 فروشگاه/آژانس</span>');
+        if (ad.value_score != null && ad.value_score !== '') badges.push(`<span class="badge-neo badge-smart">امتیاز ${Number(ad.value_score).toFixed(0)}/100</span>`);
+        if (ad.model_avg) badges.push(`<span class="badge-neo badge-avg">میانگین بازار ${Number(ad.model_avg).toLocaleString('fa-IR')}</span>`);
+        const keywordBadges = (ad.has_keyword && ad.matched_keywords)
+          ? ad.matched_keywords.map(k => `<span class="badge-neo badge-keyword">🔑 ${k}</span>`).join('')
+          : '';
+        const reasonHtml = ad.score_reason
+          ? `<div class="ad-reason" style="font-size:.78rem;color:var(--text-3);margin-top:6px;line-height:1.5;">💡 ${ad.score_reason}</div>`
+          : '';
+        const timeHtml = ad.time_text
+          ? `<div class="ad-time" style="font-size:.75rem;opacity:.75;margin-top:4px;">🕒 ${ad.time_text}</div>`
+          : '';
+        const cls = ad.has_keyword ? 'card-ad border-keyword' : 'card-ad';
+        const card = document.createElement('div');
+        card.className = cls;
+        card.style.animationDelay = (Math.min(i, 24) * 0.04) + 's';
+        card.innerHTML = `
+          <div class="ad-img-wrap">
+            <img src="${ad.image_url || 'https://via.placeholder.com/300x170?text=No+Image'}" class="ad-img" loading="lazy">
+            <div class="ad-badges">${badges.join('')}</div>
+          </div>
+          <div class="ad-body">
+            <p class="ad-title">${ad.title || ''}</p>
+            <div class="ad-price">${ad.price || 'توافقی'}</div>
+            ${ad.value_score != null && ad.value_score !== '' ? `<div class="ad-score-line">امتیاز هوشمند: <strong>${Number(ad.value_score).toFixed(0)}</strong><span>/100</span>${ad.model_avg ? ` · میانگین بازار ${Number(ad.model_avg).toLocaleString('fa-IR')}` : ''}</div>` : ''}
+            <div class="ad-status">${ad.status || ''}</div>
+            ${timeHtml}
+            ${ad.seller_text ? `<div class="ad-time" style="font-size:.75rem;opacity:.75;margin-top:2px;">🏢 ${ad.seller_text}</div>` : ''}
+            ${reasonHtml}
+            ${keywordBadges ? `<div class="ad-keywords">${keywordBadges}</div>` : ''}
+            <a href="${ad.link}" target="_blank" class="ad-link">مشاهده آگهی</a>
+          </div>`;
+        results.appendChild(card);
+      });
+    } else {
+      results.innerHTML = '<div class="empty-state" style="grid-column:1/-1;"><h5>آگهی‌ای پیدا نشد</h5>فیلترها را بازتر کن، بازه زمانی را روی «همه» بگذار، یا در حالت هوشمند حداقل امتیاز را کم کن. اگر تازه املاک را انتخاب کردی یک‌بار بدون فیلتر جستجو کن.</div>';
+    }
+  } catch (e) {
+    console.error(e);
+    results.innerHTML = '<div class="empty-state error" style="grid-column:1/-1;"><h5>خطا در ارتباط</h5>اتصال را بررسی و دوباره تلاش کن.</div>';
+  }
+  loading.style.display = 'none';
+  btn.disabled = false;
+});
+
+document.getElementById('saveMonitorBtn').addEventListener('click', async () => {
+  const name = prompt('نام این مانیتور را وارد کن:', currentCategory === 'mobile' ? 'مانیتور موبایل' : currentCategory === 'car' ? 'مانیتور خودرو' : currentCategory === 'apartment-sell' ? 'مانیتور فروش مسکونی' : 'مانیتور اجاره مسکونی');
+  if (!name) return;
+  const trackPrice = confirm('رصد تغییر قیمت هم فعال شود؟\n(روزانه قیمت آگهی‌های قبلی چک می‌شود)');
+  const res = await fetch('/api/monitors', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name,
+      category: currentCategory,
+      settings: buildSettings(),
+      track_price: trackPrice
+    })
+  });
+  if (res.status === 401) { window.location.href = '/login'; return; }
+  const data = await res.json();
+  alert(data.success ? 'مانیتور ذخیره شد.' : 'خطا در ذخیره');
+});
+
+async function loadMonitors() {
+  const res = await fetch('/api/monitors');
+  if (res.status === 401) { window.location.href = '/login'; return; }
+  const list = await res.json();
+  const box = document.getElementById('monitorsList');
+  const empty = document.getElementById('monitorsEmpty');
+  box.innerHTML = '';
+  if (!list.length) { empty.style.display = 'block'; return; }
+  empty.style.display = 'none';
+  list.forEach((m, i) => {
+    const active = m.is_active == 1;
+    const track = m.track_price == 1 ? ' · 💰 رصد قیمت' : '';
+    const card = document.createElement('div');
+    card.className = 'monitor-card' + (active ? '' : ' inactive');
+    card.style.animationDelay = (i * 0.05) + 's';
+    card.innerHTML = `
+      <div class="m-head">
+        <h6>${m.name}</h6>
+        <span class="status-pill ${active ? 'on' : 'off'}">${active ? 'فعال' : 'غیرفعال'}</span>
+      </div>
+      <div class="monitor-meta">${m.category === 'mobile' ? '📱 موبایل' : m.category === 'car' ? '🚗 خودرو' : m.category === 'apartment-sell' ? '🏠 فروش' : m.category === 'apartment-rent' ? '🔑 اجاره' : m.category}${track} · ${m.created_at || ''}</div>
+      <div class="monitor-actions">
+        <button class="btn-ghost-neo" onclick="toggleMonitor(${m.id})">${active ? 'غیرفعال' : 'فعال'} کن</button>
+        <button class="btn-ghost-neo" onclick="deleteMonitor(${m.id})" style="color:#C22448;">حذف</button>
+      </div>`;
+    box.appendChild(card);
+  });
+}
+async function toggleMonitor(id) { await fetch('/api/monitors/' + id + '/toggle', { method: 'POST' }); loadMonitors(); }
+async function deleteMonitor(id) { if (!confirm('حذف شود؟')) return; await fetch('/api/monitors/' + id, { method: 'DELETE' }); loadMonitors(); }
+
+document.getElementById('testTelegramBtn').addEventListener('click', async () => {
+  await fetch('/api/test-telegram', { method: 'POST' });
+  alert('پیام تست تلگرام ارسال شد.');
+});
+document.getElementById('testEmailBtn').addEventListener('click', async () => {
+  await fetch('/api/test-email', { method: 'POST' });
+  alert('پیام تست ایمیل ارسال شد. اینباکس را چک کن.');
+});
+
+async function loadHistory() {
+  const res = await fetch('/api/history?limit=150');
+  if (res.status === 401) { window.location.href = '/login'; return; }
+  const list = await res.json();
+  const body = document.getElementById('historyBody');
+  const empty = document.getElementById('historyEmpty');
+  body.innerHTML = '';
+  if (!list.length) { empty.style.display = 'block'; return; }
+  empty.style.display = 'none';
+  list.forEach(h => {
+    body.innerHTML += `
+      <tr>
+        <td class="hist-time">${(h.found_at || '').replace('T', ' ').slice(0, 16)}</td>
+        <td>${h.monitor_name || '-'}</td>
+        <td>${h.title || ''}</td>
+        <td class="hist-price">${h.price || ''}</td>
+        <td>${h.matched_keywords || ''}</td>
+        <td><a href="${h.link}" target="_blank" class="btn-ghost-neo" style="text-decoration:none;">مشاهده</a></td>
+      </tr>`;
+  });
+}
+document.getElementById('refreshHistoryBtn').addEventListener('click', loadHistory);
+document.getElementById('clearHistoryBtn')?.addEventListener('click', async () => {
+  if (!confirm('کل تاریخچه آگهی‌های پیدا‌شده پاک شود؟')) return;
+  try {
+    const r = await fetch('/api/history/clear', {method:'POST', credentials:'same-origin'});
+    const d = await r.json();
+    if (d.success) loadHistory();
+    else alert('خطا در پاکسازی');
+  } catch (e) { alert('خطا: ' + e.message); }
+});
+</script>
+
+
+      <div class="site-footer">
+        <h4>دسترسی سریع</h4>
+        <div class="footer-links">
+          <a href="/subscribe">خرید اشتراک</a>
+          <a href="/support">پشتیبانی</a>
+          <a href="/notifications">اعلان‌ها</a>
+          <a href="/page/guide">راهنمای استفاده</a>
+          <a href="/page/buy_guide">راهنمای خرید</a>
+          <a href="/page/terms">قوانین</a>
+          <a href="/page/about">درباره ما</a>
+          <a href="/account">حساب کاربری</a>
+        </div>
+        <div class="footer-copy">دیده‌بان دیوار — رصد هوشمند آگهی‌ها</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+function openSide(){
+  document.getElementById('sidebar').classList.add('open');
+  document.getElementById('sideOverlay').classList.add('show');
+}
+function closeSide(){
+  document.getElementById('sidebar').classList.remove('open');
+  document.getElementById('sideOverlay').classList.remove('show');
+}
+</script>
+<script>
+(async function loadNotifBadge(){
+  try {
+    const res = await fetch('/api/notifications/unread-count');
+    if (!res.ok) return;
+    const data = await res.json();
+    const c = Number(data.count || 0);
+    const badge = document.getElementById('navNotifBadge');
+    if (!badge) return;
+    if (c > 0) {
+      badge.style.display = 'inline-flex';
+      badge.textContent = c > 99 ? '99+' : String(c);
+    } else {
+      badge.style.display = 'none';
+    }
+  } catch (e) {}
+})();
+</script><script src="/static/js/theme.js"></script>
+<script src="/static/pwa.js" defer></script>
+<script>
+(async function(){
+  try {
+    const res = await fetch('/api/notifications/unread-count');
+    if (!res.ok) return;
+    const data = await res.json();
+    const c = Number(data.count || 0);
+    const badge = document.getElementById('navNotifBadge');
+    const stat = document.getElementById('statUnread');
+    if (stat) stat.textContent = c;
+    if (badge) {
+      if (c > 0) { badge.style.display = 'inline-flex'; badge.textContent = c > 99 ? '99+' : String(c); }
+      else badge.style.display = 'none';
+    }
+  } catch(e) {}
+})();
+</script>
+</body>
+</html>

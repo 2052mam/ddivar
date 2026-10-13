@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>خرید اشتراک | دیده‌بان</title>
+<script>
+(function(){try{var t=localStorage.getItem('divar_theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t);else document.documentElement.setAttribute('data-theme','dark');}catch(e){document.documentElement.setAttribute('data-theme','dark');}})();
+</script>
+<link rel="stylesheet" href="/static/css/app.css">
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#070A12">
+
+</head>
+<body>
+<div class="side-overlay" id="sideOverlay" onclick="closeSide()"></div>
+<div class="app-frame">
+  <aside class="sidebar" id="sidebar">
+    <a class="side-brand" href="/">
+      <span class="side-logo">📡</span>
+      <span><strong>دیده‌بان</strong><small>رصد هوشمند دیوار</small></span>
+    </a>
+    <nav class="side-nav">
+      <a class="side-link" href="/"><span class="ico">⌘</span> داشبورد</a>
+      <a class="side-link" href="/notifications"><span class="ico">🔔</span> اعلان‌ها</a>
+      <a class="side-link active" href="/subscribe"><span class="ico">💎</span> اشتراک</a>
+      <a class="side-link" href="/support"><span class="ico">💬</span> پشتیبانی</a>
+      <a class="side-link" href="/account"><span class="ico">👤</span> حساب</a>
+      <a class="side-link" href="/page/guide"><span class="ico">📖</span> راهنما</a>
+      {% if user is defined and user and user.role == 'admin' %}<a class="side-link" href="/admin"><span class="ico">🛠</span> مدیریت</a>{% endif %}
+    </nav>
+    <div class="side-foot">
+            <button type="button" class="theme-toggle" data-theme-toggle>
+        <span><span class="theme-ico">☀️</span> <span class="theme-lbl">تم روشن</span></span>
+      </button>
+      <a class="side-link" href="/logout"><span class="ico">⎋</span> خروج</a>
+    </div>
+  </aside>
+  <div class="main-col">
+    <div class="topbar-mobile">
+      <a class="brand-m" href="/"><span class="side-logo" style="width:32px;height:32px;font-size:.9rem;border-radius:9px">📡</span> دیده‌بان</a>
+      <button type="button" class="menu-btn" onclick="openSide()">☰</button>
+    </div>
+    <div class="content">
+
+      <div class="page-head">
+        <div class="eyebrow">Billing</div>
+        <h1>خرید اشتراک</h1>
+        <p>پلن را انتخاب کنید، واریز کنید، رسید بفرستید — بعد از تأیید فعال می‌شود</p>
+      </div>
+      <div class="plan-grid" id="plans">
+        {% for p in plans %}
+        <div class="plan" data-id="{{ p.id }}" onclick="selectPlan(this)">
+          <h4>{{ p.name }}</h4>
+          <div class="price">{{ "{:,}".format(p.price) }} <span style="font-size:.72rem;color:var(--text-3)">تومان</span></div>
+          <p class="desc">{{ p.desc or '' }}</p>
+          <div class="meta">{{ p.days }} روز · تا {{ p.max_monitors }} مانیتور</div>
+        </div>
+        {% endfor %}
+      </div>
+      <div class="card">
+        <h3 style="margin:0 0 12px;font-weight:800">اطلاعات واریز</h3>
+        <div class="pay-info">
+          <div>شماره کارت: <b>{{ payment.card_number if payment else '—' }}</b></div>
+          <div>به نام: <b>{{ payment.card_owner if payment else '—' }}</b></div>
+          <div>بانک: <b>{{ payment.bank_name if payment else '—' }}</b></div>
+        </div>
+        <form id="payForm">
+          <input type="hidden" id="plan_id" name="plan_id">
+          <label>شماره موبایل</label>
+          <input type="tel" id="phone" class="neo-input" placeholder="09xxxxxxxxx" required>
+          <label>تصویر رسید</label>
+          <input type="file" id="receipt" accept="image/*,.pdf" required>
+          <button type="submit" class="btn-neo btn-primary-neo">ارسال درخواست</button>
+          <div id="formMsg" class="msg"></div>
+        </form>
+      </div>
+      <div class="card">
+        <h3 style="margin:0 0 12px;font-weight:800">درخواست‌های قبلی</h3>
+        {% if requests %}
+        <table class="history-table">
+          <thead><tr><th>پلن</th><th>مبلغ</th><th>وضعیت</th><th>تاریخ</th></tr></thead>
+          <tbody>
+          {% for r in requests %}
+            <tr>
+              <td>{{ r.plan_name or r.plan_id }}</td>
+              <td>{{ "{:,}".format(r.amount or 0) }}</td>
+              <td><span class="badge {{ r.status }}">{{ {'pending':'در انتظار','approved':'تأیید شده','rejected':'رد شده'}.get(r.status, r.status) }}</span></td>
+              <td>{{ (r.created_at or '')[:16] }}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+        {% else %}
+        <p style="color:var(--text-3);margin:0">هنوز درخواستی ثبت نشده.</p>
+        {% endif %}
+      </div>
+
+    </div>
+  </div>
+</div>
+<script>
+function openSide(){document.getElementById('sidebar').classList.add('open');document.getElementById('sideOverlay').classList.add('show')}
+function closeSide(){document.getElementById('sidebar').classList.remove('open');document.getElementById('sideOverlay').classList.remove('show')}
+</script>
+<script>
+let selected=null;
+function selectPlan(el){
+  document.querySelectorAll('.plan').forEach(p=>p.classList.remove('active'));
+  el.classList.add('active'); selected=el.dataset.id;
+  document.getElementById('plan_id').value=selected;
+}
+const first=document.querySelector('.plan'); if(first) selectPlan(first);
+document.getElementById('payForm').addEventListener('submit', async (e)=>{
+  e.preventDefault();
+  const msg=document.getElementById('formMsg'); msg.className='msg';
+  if(!selected){msg.textContent='پلن را انتخاب کنید';msg.classList.add('err');return;}
+  const fd=new FormData();
+  fd.append('plan_id',selected);
+  fd.append('phone',document.getElementById('phone').value);
+  const file=document.getElementById('receipt').files[0];
+  if(!file){msg.textContent='رسید را آپلود کنید';msg.classList.add('err');return;}
+  fd.append('receipt',file); msg.textContent='در حال ارسال...';
+  try{
+    const res=await fetch('/api/subscribe/request',{method:'POST',body:fd});
+    const data=await res.json();
+    if(data.success){msg.textContent=data.message;msg.classList.add('ok');setTimeout(()=>location.reload(),1200);}
+    else{msg.textContent=data.error||'خطا';msg.classList.add('err');}
+  }catch(err){msg.textContent='خطای ارتباط';msg.classList.add('err');}
+});
+</script>
+<script src="/static/js/theme.js"></script>
+<script src="/static/pwa.js" defer></script>
+</body>
+</html>

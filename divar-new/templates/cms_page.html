@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{{ content.title }} | دیده‌بان</title>
+<script>
+(function(){try{var t=localStorage.getItem('divar_theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t);else document.documentElement.setAttribute('data-theme','dark');}catch(e){document.documentElement.setAttribute('data-theme','dark');}})();
+</script>
+<link rel="stylesheet" href="/static/css/app.css">
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#070A12">
+
+</head>
+<body>
+<div class="side-overlay" id="sideOverlay" onclick="closeSide()"></div>
+<div class="app-frame">
+  <aside class="sidebar" id="sidebar">
+    <a class="side-brand" href="/">
+      <span class="side-logo">📡</span>
+      <span><strong>دیده‌بان</strong><small>رصد هوشمند دیوار</small></span>
+    </a>
+    <nav class="side-nav">
+      <a class="side-link" href="/"><span class="ico">⌘</span> داشبورد</a>
+      <a class="side-link" href="/notifications"><span class="ico">🔔</span> اعلان‌ها</a>
+      <a class="side-link" href="/subscribe"><span class="ico">💎</span> اشتراک</a>
+      <a class="side-link" href="/support"><span class="ico">💬</span> پشتیبانی</a>
+      <a class="side-link" href="/account"><span class="ico">👤</span> حساب</a>
+      <a class="side-link active" href="/page/guide"><span class="ico">📖</span> راهنما</a>
+      {% if user is defined and user and user.role == 'admin' %}<a class="side-link" href="/admin"><span class="ico">🛠</span> مدیریت</a>{% endif %}
+    </nav>
+    <div class="side-foot">
+            <button type="button" class="theme-toggle" data-theme-toggle>
+        <span><span class="theme-ico">☀️</span> <span class="theme-lbl">تم روشن</span></span>
+      </button>
+      <a class="side-link" href="/logout"><span class="ico">⎋</span> خروج</a>
+    </div>
+  </aside>
+  <div class="main-col">
+    <div class="topbar-mobile">
+      <a class="brand-m" href="/"><span class="side-logo" style="width:32px;height:32px;font-size:.9rem;border-radius:9px">📡</span> دیده‌بان</a>
+      <button type="button" class="menu-btn" onclick="openSide()">☰</button>
+    </div>
+    <div class="content">
+
+      <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px">
+        <a class="side-link" href="/page/guide" style="display:inline-flex;padding:8px 12px">راهنما</a>
+        <a class="side-link" href="/page/buy_guide" style="display:inline-flex;padding:8px 12px">خرید</a>
+        <a class="side-link" href="/page/terms" style="display:inline-flex;padding:8px 12px">قوانین</a>
+        <a class="side-link" href="/page/about" style="display:inline-flex;padding:8px 12px">درباره</a>
+      </div>
+      <div class="cms-body">
+        <h1 style="margin:0 0 16px;font-size:1.4rem;font-weight:800;color:var(--text)">{{ content.title }}</h1>
+        <div>{{ content.body }}</div>
+      </div>
+
+    </div>
+  </div>
+</div>
+<script>
+function openSide(){document.getElementById('sidebar').classList.add('open');document.getElementById('sideOverlay').classList.add('show')}
+function closeSide(){document.getElementById('sidebar').classList.remove('open');document.getElementById('sideOverlay').classList.remove('show')}
+</script>
+
+<script src="/static/js/theme.js"></script>
+<script src="/static/pwa.js" defer></script>
+</body>
+</html>

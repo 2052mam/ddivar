@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>حساب کاربری | دیده‌بان</title>
+<script>
+(function(){try{var t=localStorage.getItem('divar_theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t);else document.documentElement.setAttribute('data-theme','dark');}catch(e){document.documentElement.setAttribute('data-theme','dark');}})();
+</script>
+<link rel="stylesheet" href="/static/css/app.css">
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#070A12">
+</head>
+<body>
+<div class="side-overlay" id="sideOverlay" onclick="closeSide()"></div>
+<div class="app-frame">
+  <aside class="sidebar" id="sidebar">
+    <a class="side-brand" href="/">
+      <span class="side-logo">📡</span>
+      <span><strong>دیده‌بان</strong><small>رصد هوشمند دیوار</small></span>
+    </a>
+    <nav class="side-nav">
+      <a class="side-link" href="/"><span class="ico">⌘</span> داشبورد</a>
+      <a class="side-link" href="/notifications"><span class="ico">🔔</span> اعلان‌ها</a>
+      <a class="side-link" href="/subscribe"><span class="ico">💎</span> اشتراک</a>
+      <a class="side-link" href="/support"><span class="ico">💬</span> پشتیبانی</a>
+      <a class="side-link active" href="/account"><span class="ico">👤</span> حساب</a>
+      <a class="side-link" href="/page/guide"><span class="ico">📖</span> راهنما</a>
+      {% if user is defined and user and user.role == 'admin' %}<a class="side-link" href="/admin"><span class="ico">🛠</span> مدیریت</a>{% endif %}
+    </nav>
+    <div class="side-foot">
+      <button type="button" class="theme-toggle" data-theme-toggle>
+        <span><span class="theme-ico">☀️</span> <span class="theme-lbl">تم روشن</span></span>
+      </button>
+      <a class="side-link" href="/logout"><span class="ico">⎋</span> خروج</a>
+    </div>
+  </aside>
+  <div class="main-col">
+    <div class="topbar-mobile">
+      <a class="brand-m" href="/"><span class="side-logo" style="width:32px;height:32px;font-size:.9rem;border-radius:9px">📡</span> دیده‌بان</a>
+      <button type="button" class="menu-btn" onclick="openSide()">☰</button>
+    </div>
+    <div class="content">
+
+      <div class="page-head">
+        <div class="eyebrow">Account</div>
+        <h1>حساب کاربری</h1>
+        <p>اشتراک، امنیت و کانال‌های اعلان</p>
+      </div>
+
+      <div class="card">
+        <h3 style="margin:0 0 12px;font-weight:800">وضعیت حساب</h3>
+        <div class="row"><span>نام کاربری</span><b>{{ user.username }}</b></div>
+        <div class="row"><span>نقش</span><b>{{ 'مدیر' if user.role == 'admin' else 'کاربر' }}</b></div>
+        <div class="row"><span>پلن</span><b>{{ user.plan }}</b></div>
+        <div class="row"><span>وضعیت</span><span class="badge {{ 'on' if sub_active else 'off' }}">{{ 'فعال' if sub_active else 'غیرفعال / منقضی' }}</span></div>
+        <div class="row"><span>تاریخ انقضا</span><b>{{ user.subscription_expires_at or '—' }}</b></div>
+        <div class="row"><span>سقف مانیتور</span><b>{{ user.max_monitors }}</b></div>
+        <div style="display:flex;flex-wrap:wrap;gap:10px;margin-top:16px">
+          <a href="/subscribe" class="btn-neo btn-primary-neo" style="display:inline-flex;text-decoration:none;padding:11px 18px">خرید / تمدید اشتراک</a>
+          <a href="/logout" class="btn-neo btn-secondary-neo" style="display:inline-flex;text-decoration:none;padding:11px 18px">خروج از حساب کاربری</a>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3 style="margin:0 0 12px;font-weight:800">تغییر رمز عبور</h3>
+        <form method="post">
+          <input type="hidden" name="action" value="password">
+          <label>رمز فعلی</label>
+          <input type="password" name="current_password" required autocomplete="current-password" class="neo-input">
+          <label>رمز جدید</label>
+          <input type="password" name="new_password" required minlength="6" autocomplete="new-password" class="neo-input">
+          <button type="submit" class="btn-neo btn-primary-neo" style="margin-top:14px">ذخیره رمز جدید</button>
+        </form>
+      </div>
+
+      <div class="card">
+        <h3 style="margin:0 0 12px;font-weight:800">اعلان شخصی</h3>
+        <form method="post">
+          <input type="hidden" name="action" value="notify">
+          <label>Telegram Chat ID</label>
+          <input name="telegram_chat_id" value="{{ user.telegram_chat_id or '' }}" class="neo-input" placeholder="مثلاً 123456789">
+          <label>ایمیل اعلان</label>
+          <input name="notify_email" type="email" value="{{ user.notify_email or '' }}" class="neo-input" placeholder="email@example.com">
+          <button type="submit" class="btn-neo btn-primary-neo" style="margin-top:14px">ذخیره</button>
+        </form>
+      </div>
+
+      <div class="card">
+        <h3 style="margin:0 0 12px;font-weight:800">نوتیفیکیشن مرورگر (Web Push)</h3>
+        <p style="color:var(--text-2);font-size:.85rem;margin:0 0 12px">
+          برای دریافت آنی آگهی‌ها حتی وقتی مرورگر بسته است، نوتیف را فعال کنید و اپ را نصب (PWA) کنید.
+          اگر نوتیف‌ها قطع شد، دکمه «ریست سابسکریپشن» را بزنید و دوباره اجازه بدهید.
+        </p>
+        <div style="display:flex;flex-wrap:wrap;gap:8px">
+          <button type="button" class="btn-neo btn-secondary-neo" id="pushEnableBtn" style="padding:10px 16px;font-size:.84rem">فعال‌سازی نوتیف</button>
+          <button type="button" class="btn-neo btn-secondary-neo" id="pushTestBtn" style="padding:10px 16px;font-size:.84rem">تست ارسال</button>
+          <button type="button" class="btn-neo btn-secondary-neo" id="pushResetBtn" style="padding:10px 16px;font-size:.84rem;border-color:var(--amber);color:var(--amber)">ریست سابسکریپشن</button>
+        </div>
+        <div id="pushMsg" class="msg" style="margin-top:10px"></div>
+      </div>
+
+      {% if msg %}<div class="card" style="border-color:rgba(46,230,166,.35)"><b>{{ msg }}</b></div>{% endif %}
+
+    </div>
+  </div>
+</div>
+<script>
+function openSide(){document.getElementById('sidebar').classList.add('open');document.getElementById('sideOverlay').classList.add('show')}
+function closeSide(){document.getElementById('sidebar').classList.remove('open');document.getElementById('sideOverlay').classList.remove('show')}
+</script>
+<script>
+document.getElementById('pushEnableBtn')?.addEventListener('click', async ()=>{
+  const msg = document.getElementById('pushMsg');
+  try {
+    if (window.DivarPWA) {
+      await DivarPWA.enableNotifications();
+      msg.textContent = 'درخواست فعال‌سازی ارسال شد. اگر اجازه داده شد، نوتیف فعال است.';
+    } else {
+      msg.textContent = 'PWA آماده نیست — صفحه را رفرش کنید';
+    }
+  } catch (e) {
+    msg.textContent = 'خطا: ' + (e.message || e);
+  }
+});
+document.getElementById('pushTestBtn')?.addEventListener('click', async ()=>{
+  const msg = document.getElementById('pushMsg');
+  try {
+    const r = await fetch('/api/push/test', {method:'POST', credentials:'same-origin'});
+    const d = await r.json();
+    msg.textContent = d.message || JSON.stringify(d);
+  } catch (e) {
+    msg.textContent = 'خطا در تست: ' + e.message;
+  }
+});
+document.getElementById('pushResetBtn')?.addEventListener('click', async ()=>{
+  const msg = document.getElementById('pushMsg');
+  if (!confirm('همه سابسکریپشن‌های پوش این حساب پاک شود و دوباره ثبت شود؟')) return;
+  try {
+    const r = await fetch('/api/push/reset', {method:'POST', credentials:'same-origin'});
+    const d = await r.json();
+    msg.textContent = d.message || 'ریست شد';
+    if ('serviceWorker' in navigator) {
+      const reg = await navigator.serviceWorker.ready;
+      const sub = await reg.pushManager.getSubscription();
+      if (sub) await sub.unsubscribe();
+    }
+    if (window.DivarPWA) {
+      setTimeout(() => DivarPWA.enableNotifications(), 400);
+    }
+  } catch (e) {
+    msg.textContent = 'خطا در ریست: ' + e.message;
+  }
+});
+</script>
+<script src="/static/js/theme.js"></script>
+<script src="/static/pwa.js" defer></script>
+</body>
+</html>
