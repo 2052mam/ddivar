@@ -402,9 +402,12 @@ async function loadPayments(){
   });
 }
 async function reviewPay(id,status){
-  const note=prompt(status==='approved'?'یادداشت (اختیاری):':'دلیل رد:')||'';
-  const r=await fetch(`/api/admin/payments/${id}/review`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({status,note})});
-  const d=await r.json(); if(d.success) loadPayments(); else alert(d.error||'خطا');
+  const promptResult=prompt(status==='approved'?'یادداشت (اختیاری):':'دلیل رد:');
+  if(promptResult===null) return;
+  const note=promptResult||'';
+  const action=status==='approved'?'approve':'reject';
+  const r=await fetch(`/api/admin/payments/${id}/review`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,status,note})});
+  const d=await r.json(); if(d.success){ loadPayments(); loadUsers(); } else alert(d.error||'خطا');
 }
 
 async function loadSettings(){

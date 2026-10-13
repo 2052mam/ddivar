@@ -1,61 +1,94 @@
-# monitor.py
-# اجرای دوره‌ای مانیتورها (cron / systemd timer)
-# مثال:
-# */10 * * * * cd /path/to/app && python monitor.py >> monitor.log 2>&1
+"""
+اسکریپت مستقل مانیتور — توسط Cron هر ۵ دقیقه اجرا می‌شود.
+قابل اجرا دستی: python monitor.py
 
+ویژگی‌ها:
+- قفل پردازشی غیرمسدودکننده (fcntl.flock) برای جلوگیری از تداخل اجرای همزمان Cron
+- ایزوله‌سازی seen_ads به تفکیک هر مانیتور (monitor_id, token)
+- اتصال کوتاه‌مدت به SQLite (عدم نگه‌داشتن قفل دیتابیس حین درخواست‌های شبکه)
+- استخراج واقعی قیمت در پیگیری تغییر قیمت (check_price_changes)
+- ثبت کامل اعلان‌های درون‌برنامه‌ای + ارسال Web Push / تلگرام / ایمیل
+"""
+from datetime import datetime, timedelta
 import json
+import os
+import sys
 import time
-import traceback
-from datetime import datetime
+from typing import Optional
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
+
+# اطمینان از اینکه مسیر پروژه در sys.path هست (برای اجرای از cron با هر working directory)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
 
 from app import (
-    init_db,
     get_db,
-    run_search_logic,
+    get_post_details_cached,
+    init_db,
     notify,
-    save_notification,
     parse_price,
+    rental_equivalents,
+    run_search_logic,
+    save_notification,
 )
-from config import REQUEST_DELAY, MAX_NOTIFY_PER_RUN
 
-# فاصله بین مانیتورها (ثانیه) — جلوگیری از rate-limit دیوار
-MONITOR_GAP_SEC = max(1.5, float(REQUEST_DELAY or 1.0) + 0.5)
+# سقف بررسی تغییر قیمت در هر اجرا (جلوگیری از کند شدن و بلاک شدن توسط دیوار)
+PRICE_CHECK_BATCH = 20
+PRICE_CHECK_MAX_AGE_DAYS = 7
+PRICE_CHECK_MIN_INTERVAL_MIN = 30
+MAX_NOTIFY_PER_RUN = 12       # حداکثر آگهی در هر پیام ایمیل/تلگرام
+MAX_SAVE_NOTIF_PER_RUN = 50   # حداکثر اعلان ذخیره‌شده در پنل در هر اجرا
+RETENTION_DAYS = 14           # نگهداری تاریخچه و آگهی‌های دیده‌شده
+CLEANUP_INTERVAL_HOURS = 6    # فاصله پاکسازی خودکار
 
-
-def get_meta(conn, key, default=None):
-    row = conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
-    return row["value"] if row else default
-
-
-def set_meta(conn, key, value):
-    conn.execute(
-        "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        (key, value),
-    )
+LOCK_FILE_PATH = os.path.join(BASE_DIR, "monitor.lock")
 
 
-def should_check_prices_today(conn) -> bool:
-    last = get_meta(conn, "last_price_check")
-    if not last:
-        return True
+def acquire_monitor_lock():
+    """قفل انحصاری غیرمسدودکننده برای جلوگیری از اجرای همزمان چند پروسه‌ی monitor.py."""
+    if fcntl is None:
+        return None
     try:
-        last_dt = datetime.fromisoformat(last)
-        return (datetime.now() - last_dt).total_seconds() > 20 * 3600
+        fh = open(LOCK_FILE_PATH, "w")
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fh.write(f"{os.getpid()} {datetime.now().isoformat()}\n")
+        fh.flush()
+        return fh
+    except (BlockingIOError, IOError, OSError):
+        try:
+            fh.close()
+        except Exception:
+            pass
+        return False
+
+
+def release_monitor_lock(lock_fh) -> None:
+    if not lock_fh or isinstance(lock_fh, bool):
+        return
+    try:
+        if fcntl is not None:
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
     except Exception:
-        return True
+        pass
+    try:
+        lock_fh.close()
+    except Exception:
+        pass
 
 
-def owner_is_eligible(conn, user_id) -> bool:
-    if not user_id:
-        return True  # legacy
-    user = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
-    if not user:
+def is_user_sub_active(user_row) -> bool:
+    if not user_row:
         return False
-    if user["role"] == "admin":
+    if not user_row["is_active"]:
+        return False
+    if user_row["role"] == "admin":
         return True
-    if not user["is_active"]:
-        return False
-    exp = user["subscription_expires_at"]
+    exp = user_row["subscription_expires_at"]
     if not exp:
         return False
     try:
@@ -64,286 +97,316 @@ def owner_is_eligible(conn, user_id) -> bool:
         return False
 
 
-def get_owner_notify_targets(conn, user_id):
-    if not user_id:
-        return None, None
-    user = conn.execute(
-        "SELECT telegram_chat_id, notify_email FROM users WHERE id=?", (user_id,)
-    ).fetchone()
-    if not user:
-        return None, None
-    return user["telegram_chat_id"], user["notify_email"]
-
-
-def extract_price_from_post(token: str):
-    """دریافت قیمت به‌روز از صفحه آگهی — best effort"""
+def extract_price_from_post(token: str, category: str = "") -> Optional[int]:
+    """استخراج قیمت فعلی یک آگهی از جزئیات دیوار برای تشخیص تغییر قیمت."""
+    token = str(token or "").strip()
+    if not token:
+        return None
     try:
-        from app import get_post_description, parse_price as _pp
-        # get_post_description فقط متن است؛ برای قیمت از search استفاده نمی‌کنیم
-        # در صورت نیاز می‌توان API جزئیات پست را اضافه کرد
-        return None
-    except Exception:
-        return None
+        details = get_post_details_cached(token)
+        if not details:
+            return None
+        if category == "apartment-rent":
+            credit = details.get("credit_num")
+            rent = details.get("rent_num")
+            if credit is not None or rent is not None:
+                eq = rental_equivalents(credit, rent)
+                if eq.get("deposit_equivalent_num") is not None:
+                    return int(eq["deposit_equivalent_num"])
+        price_num = details.get("price_num")
+        if price_num is not None and int(price_num) > 0:
+            return int(price_num)
+    except Exception as e:
+        print(f"extract_price_from_post error ({token}):", e)
+    return None
 
 
-def check_price_changes(conn, mon, tg_chat_id, notify_email, max_check: int = 40):
-    rows = conn.execute(
-        """
-        SELECT token, title, price, price_num, link FROM seen_ads
-        WHERE monitor_id=?
-        ORDER BY found_at DESC LIMIT ?
-        """,
-        (mon["id"], max_check),
-    ).fetchall()
-    changes = 0
-    lines = [f"تغییر قیمت — {mon['name']}\n"]
-    for row in rows:
-        token = row["token"]
-        old_num = row["price_num"]
-        if old_num is None:
-            continue
-        new_num = extract_price_from_post(token)
-        if new_num is None:
-            continue
-        if int(new_num) == int(old_num):
-            continue
-        now = datetime.now().isoformat()
-        conn.execute(
+def check_price_changes(conn=None):
+    """بررسی تغییر قیمت فقط برای آگهی‌های جدیدِ مانیتورهایی که track_price روشن دارند."""
+    now = datetime.now()
+    cutoff_found = (now - timedelta(days=PRICE_CHECK_MAX_AGE_DAYS)).isoformat()
+    cutoff_checked = (now - timedelta(minutes=PRICE_CHECK_MIN_INTERVAL_MIN)).isoformat()
+
+    own_conn = conn is None
+    db = conn if conn is not None else get_db()
+    try:
+        rows = db.execute(
             """
-            INSERT INTO price_changes
-            (token, monitor_id, title, old_price, new_price, link, changed_at)
-            VALUES (?,?,?,?,?,?,?)
+            SELECT s.*, m.name AS monitor_name, m.category AS monitor_category,
+                   m.user_id, u.telegram_chat_id, u.notify_email, u.role, u.is_active AS u_active, u.subscription_expires_at
+            FROM seen_ads s
+            JOIN monitors m ON m.id = s.monitor_id
+            LEFT JOIN users u ON u.id = m.user_id
+            WHERE m.is_active = 1
+              AND m.track_price = 1
+              AND s.price_num IS NOT NULL
+              AND (s.found_at IS NULL OR s.found_at >= ?)
+              AND (s.last_checked IS NULL OR s.last_checked <= ?)
+            ORDER BY COALESCE(s.last_checked, '1970-01-01') ASC
+            LIMIT ?
             """,
-            (
-                token,
-                mon["id"],
-                row["title"],
-                row["price"],
-                str(new_num),
-                row["link"],
-                now,
-            ),
-        )
-        conn.execute(
-            "UPDATE seen_ads SET price=?, price_num=?, last_checked=? WHERE token=?",
-            (str(new_num), int(new_num), now, token),
-        )
-        changes += 1
-        lines.append(
-            f"• {row['title']}\nقبل: {row['price']} → بعد: {new_num}\n{row['link']}\n"
-        )
-    if changes:
-        # ذخیره هر تغییر قیمت به صورت جدا در صفحه اعلان‌ها
-        for row in rows:
-            # فقط آیتم‌هایی که واقعاً تغییر کرده‌اند در lines آمده‌اند؛ برای سادگی از price_changes تازه استفاده می‌کنیم
-            pass
+            (cutoff_found, cutoff_checked, PRICE_CHECK_BATCH),
+        ).fetchall()
+        candidates = [dict(r) for r in rows]
+    finally:
+        if own_conn:
+            db.close()
+
+    for r in candidates:
+        u_Check = {
+            "is_active": r["u_active"],
+            "role": r["role"],
+            "subscription_expires_at": r["subscription_expires_at"],
+        }
+        if r["user_id"] and not is_user_sub_active(u_Check):
+            continue
+
+        new_num = extract_price_from_post(r["token"], category=r.get("monitor_category") or "")
+        now_iso = datetime.now().isoformat()
+
+        db_write = conn if conn is not None else get_db()
         try:
-            recent = conn.execute(
-                """
-                SELECT title, old_price, new_price, link FROM price_changes
-                WHERE monitor_id=? ORDER BY id DESC LIMIT ?
-                """,
-                (mon["id"], changes),
-            ).fetchall()
-            for r in recent:
-                body = f"قبل: {r['old_price']} → بعد: {r['new_price']}"
-                save_notification(
-                    mon["user_id"],
-                    f"تغییر قیمت: {r['title'] or mon['name']}",
-                    body,
-                    link=r["link"],
-                    monitor_id=mon["id"],
-                    conn=conn,
+            if new_num is None:
+                db_write.execute(
+                    "UPDATE seen_ads SET last_checked=? WHERE token=? AND monitor_id=?",
+                    (now_iso, r["token"], r["monitor_id"]),
                 )
-        except Exception as e:
-            print("save price notifications error:", e)
-        notify(
-            "\n".join(lines),
-            subject=f"تغییر قیمت: {mon['name']}",
-            telegram_chat_id=tg_chat_id,
-            email=notify_email,
-            user_id=mon["user_id"],
-            monitor_id=mon["id"],
-            save=False,
-        )
-    return changes
-
-
-def run():
-    init_db()
-    conn = get_db()
-    monitors = conn.execute(
-        "SELECT * FROM monitors WHERE is_active=1 ORDER BY id ASC"
-    ).fetchall()
-    do_price_check = should_check_prices_today(conn)
-
-    stats = {"ok": 0, "skip": 0, "err": 0, "new_ads": 0}
-    print(f"[{datetime.now().isoformat()}] monitor start — {len(monitors)} active")
-
-    for mon in monitors:
-        try:
-            if not owner_is_eligible(conn, mon["user_id"]):
-                print(f"  skip monitor {mon['id']}: owner inactive/expired")
-                stats["skip"] += 1
+                db_write.commit()
+                time.sleep(0.2)
                 continue
 
-            tg_chat_id, notify_email = get_owner_notify_targets(conn, mon["user_id"])
-
-            try:
-                settings = json.loads(mon["settings_json"] or "{}")
-            except Exception:
-                settings = {}
-            settings["category"] = mon["category"]
-
-            result = run_search_logic(settings)
-            if not result.get("success"):
-                print(f"  monitor {mon['id']} search failed: {result}")
-                stats["err"] += 1
-                time.sleep(MONITOR_GAP_SEC)
-                continue
-
-            ads = result.get("ads") or []
-            new_ads = []
-            for ad in ads:
-                token = ad.get("token")
-                if not token:
-                    continue
-                exists = conn.execute(
-                    "SELECT 1 FROM seen_ads WHERE token=?", (token,)
-                ).fetchone()
-                if exists:
-                    continue
-
-                now = datetime.now().isoformat()
-                price_num = ad.get("price_num")
-                if price_num is None:
-                    price_num = parse_price(ad.get("price"))
-
-                conn.execute(
-                    """
-                    INSERT INTO seen_ads
-                    (token, monitor_id, title, price, price_num, link, found_at, last_checked)
-                    VALUES (?,?,?,?,?,?,?,?)
-                    """,
-                    (
-                        token,
-                        mon["id"],
-                        ad.get("title"),
-                        ad.get("price"),
-                        price_num,
-                        ad.get("link"),
-                        now,
-                        now,
-                    ),
+            if new_num != r["price_num"]:
+                old_str = f"{r['price_num']:,} تومان"
+                new_str = f"{new_num:,} تومان"
+                diff = new_num - r["price_num"]
+                arrow = "📉 کاهش" if diff < 0 else "📈 افزایش"
+                pct = abs(diff) / r["price_num"] * 100 if r["price_num"] else 0
+                db_write.execute(
+                    "INSERT INTO price_changes (token, monitor_id, title, old_price, new_price, link, changed_at) VALUES (?,?,?,?,?,?,?)",
+                    (r["token"], r["monitor_id"], r["title"], old_str, new_str, r["link"], now_iso),
                 )
-                conn.execute(
-                    """
-                    INSERT INTO history
-                    (monitor_id, monitor_name, token, title, price, link, matched_keywords, value_score, found_at)
-                    VALUES (?,?,?,?,?,?,?,?,?)
-                    """,
-                    (
-                        mon["id"],
-                        mon["name"],
-                        token,
-                        ad.get("title"),
-                        ad.get("price"),
-                        ad.get("link"),
-                        ",".join(ad.get("matched_keywords") or []),
-                        ad.get("value_score"),
-                        now,
-                    ),
+                db_write.execute(
+                    "UPDATE seen_ads SET price=?, price_num=?, last_checked=? WHERE token=? AND monitor_id=?",
+                    (new_str, new_num, now_iso, r["token"], r["monitor_id"]),
                 )
-                new_ads.append(ad)
-
-            conn.commit()
-            stats["ok"] += 1
-            stats["new_ads"] += len(new_ads)
-
-            if new_ads:
-                lines = [f"آگهی جدید - {mon['name']}\n"]
-                for ad in new_ads[:MAX_NOTIFY_PER_RUN]:
-                    score = ad.get("value_score")
-                    score_txt = f" | امتیاز {score}" if score is not None else ""
-                    lines.append(
-                        f"• {ad.get('title')}{score_txt}\n{ad.get('price')}\n{ad.get('link')}\n"
-                    )
-                    # ذخیره هر آگهی به صورت جدا در صفحه اعلان‌ها
-                    body_parts = []
-                    if ad.get("price"):
-                        body_parts.append(str(ad.get("price")))
-                    if score is not None:
-                        body_parts.append(f"امتیاز {score}")
-                    if ad.get("rental_equivalent_display"):
-                        body_parts.append(str(ad.get("rental_equivalent_display")))
-                    if ad.get("matched_keywords"):
-                        body_parts.append("کلمات: " + ",".join(ad.get("matched_keywords") or []))
-                    try:
-                        save_notification(
-                            mon["user_id"],
-                            ad.get("title") or f"آگهی جدید — {mon['name']}",
-                            " | ".join(body_parts),
-                            link=ad.get("link"),
-                            monitor_id=mon["id"],
-                            conn=conn,
-                        )
-                    except Exception as e:
-                        print("save ad notification error:", e)
-                conn.commit()
+                db_write.commit()
+                msg = (
+                    f"<b>{arrow} قیمت ({pct:.1f}%) — {r['monitor_name']}</b>\n"
+                    f"{r['title']}\n"
+                    f"قبلی: {old_str}\n"
+                    f"جدید: <b>{new_str}</b>\n"
+                    f"🔗 {r['link']}"
+                )
                 notify(
-                    "\n".join(lines),
-                    subject=f"دیوار: {mon['name']}",
-                    telegram_chat_id=tg_chat_id,
-                    email=notify_email,
-                    user_id=mon["user_id"],
-                    monitor_id=mon["id"],
-                    save=False,
+                    msg,
+                    subject=f"تغییر قیمت: {r['title'][:40]}",
+                    telegram_chat_id=r["telegram_chat_id"],
+                    email=r["notify_email"],
+                    user_id=r["user_id"],
+                    link=r["link"],
+                    monitor_id=r["monitor_id"],
                 )
-                print(f"  monitor {mon['id']}: {len(new_ads)} new ads notified")
+            else:
+                db_write.execute(
+                    "UPDATE seen_ads SET last_checked=? WHERE token=? AND monitor_id=?",
+                    (now_iso, r["token"], r["monitor_id"]),
+                )
+                db_write.commit()
+        finally:
+            if own_conn:
+                db_write.close()
+        time.sleep(0.2)
 
-            track_price = 0
+
+def cleanup_old_records(conn):
+    """پاکسازی دوره‌ای داده‌های قدیمی تا دیتابیس سبک بماند."""
+    try:
+        row = conn.execute("SELECT value FROM meta WHERE key='last_cleanup'").fetchone()
+        if row and row["value"]:
             try:
-                track_price = int(mon["track_price"] or 0)
-            except Exception:
-                track_price = 0
-
-            if track_price and do_price_check:
-                print(f"  price-check monitor {mon['id']} ...")
-                n = check_price_changes(conn, mon, tg_chat_id, notify_email)
-                conn.commit()
-                print(f"  price changes: {n}")
-
-            time.sleep(MONITOR_GAP_SEC)
-
-        except Exception as e:
-            stats["err"] += 1
-            print(f"  Monitor {mon['id']} error: {e}")
-            traceback.print_exc()
-            try:
-                conn.rollback()
+                last_dt = datetime.fromisoformat(row["value"])
+                if datetime.now() - last_dt < timedelta(hours=CLEANUP_INTERVAL_HOURS):
+                    return
             except Exception:
                 pass
-            time.sleep(MONITOR_GAP_SEC)
 
-    if do_price_check:
-        set_meta(conn, "last_price_check", datetime.now().isoformat())
+        cutoff = (datetime.now() - timedelta(days=RETENTION_DAYS)).isoformat()
+        c1 = conn.execute("DELETE FROM history WHERE found_at < ?", (cutoff,)).rowcount
+        c2 = conn.execute("DELETE FROM price_changes WHERE changed_at < ?", (cutoff,)).rowcount
+        c3 = conn.execute(
+            """
+            DELETE FROM seen_ads
+            WHERE found_at < ?
+              AND monitor_id NOT IN (SELECT id FROM monitors WHERE track_price=1 AND is_active=1)
+            """,
+            (cutoff,),
+        ).rowcount
+        seen_cutoff_tracked = (datetime.now() - timedelta(days=RETENTION_DAYS * 2)).isoformat()
+        c4 = conn.execute("DELETE FROM seen_ads WHERE found_at < ?", (seen_cutoff_tracked,)).rowcount
+        c5 = conn.execute("DELETE FROM notifications WHERE created_at < ?", (cutoff,)).rowcount
+
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('last_cleanup', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (datetime.now().isoformat(),),
+        )
         conn.commit()
+        try:
+            conn.execute("PRAGMA optimize")
+        except Exception:
+            pass
+        print(f"[cleanup] removed history={c1}, price_changes={c2}, seen={c3+c4}, notifications={c5}")
+    except Exception as e:
+        print("cleanup error:", e)
 
-    set_meta(
-        conn,
-        "last_monitor_run",
-        json.dumps(
-            {"at": datetime.now().isoformat(), **stats},
-            ensure_ascii=False,
-        ),
-    )
-    conn.commit()
-    conn.close()
-    print(
-        f"[{datetime.now().isoformat()}] monitor finished — "
-        f"ok={stats['ok']} skip={stats['skip']} err={stats['err']} new={stats['new_ads']}"
-    )
+
+def run_all_monitors():
+    t0 = time.time()
+    stats = {"monitors": 0, "ads_checked": 0, "new_ads": 0, "errors": 0, "skipped_locked": False}
+
+    lock_fh = acquire_monitor_lock()
+    if lock_fh is False:
+        print("[monitor] another monitor.py process is already running — skipping overlapping run.")
+        stats["skipped_locked"] = True
+        return stats
+
+    try:
+        init_db()
+        conn = get_db()
+        try:
+            monitors = [
+                dict(m)
+                for m in conn.execute("SELECT * FROM monitors WHERE is_active=1").fetchall()
+            ]
+        finally:
+            conn.close()
+
+        for m in monitors:
+            conn_u = get_db()
+            try:
+                user = (
+                    dict(conn_u.execute("SELECT * FROM users WHERE id=?", (m["user_id"],)).fetchone() or {})
+                    if m["user_id"] else None
+                )
+            finally:
+                conn_u.close()
+
+            if m["user_id"] and not is_user_sub_active(user):
+                print(f"[skip] monitor #{m['id']} ({m['name']}): user #{m['user_id']} subscription inactive")
+                continue
+
+            stats["monitors"] += 1
+            try:
+                settings = json.loads(m["settings_json"])
+                settings["category"] = m["category"]
+                res = run_search_logic(settings)
+                ads = res.get("ads", [])
+                stats["ads_checked"] += len(ads)
+                new_ads = []
+                now_iso = datetime.now().isoformat()
+
+                conn_w = get_db()
+                try:
+                    for ad in ads:
+                        token = str(ad.get("token") or "").strip()
+                        if not token:
+                            continue
+                        exists = conn_w.execute(
+                            "SELECT 1 FROM seen_ads WHERE token=? AND monitor_id=?",
+                            (token, m["id"]),
+                        ).fetchone()
+                        if exists:
+                            continue
+                        pnum = ad.get("price_num") or parse_price(ad.get("price", ""))
+                        conn_w.execute(
+                            "INSERT OR REPLACE INTO seen_ads (token, monitor_id, title, price, price_num, link, found_at, last_checked) VALUES (?,?,?,?,?,?,?,?)",
+                            (token, m["id"], ad.get("title"), ad.get("price"), pnum, ad.get("link"), now_iso, now_iso),
+                        )
+                        conn_w.execute(
+                            "INSERT INTO history (monitor_id, monitor_name, token, title, price, link, matched_keywords, value_score, found_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                            (
+                                m["id"],
+                                m["name"],
+                                token,
+                                ad.get("title"),
+                                ad.get("price"),
+                                ad.get("link"),
+                                ",".join(ad.get("matched_keywords", [])),
+                                ad.get("value_score"),
+                                now_iso,
+                            ),
+                        )
+                        new_ads.append(ad)
+
+                    if new_ads and user:
+                        for ad in new_ads[:MAX_SAVE_NOTIF_PER_RUN]:
+                            score_txt = f" · امتیاز {int(round(ad['value_score']))}/100" if ad.get("value_score") else ""
+                            kw_txt = f" · 🎯 {','.join(ad['matched_keywords'])}" if ad.get("matched_keywords") else ""
+                            save_notification(
+                                user_id=user["id"],
+                                title=f"🔔 {m['name']}: {(ad.get('title') or '')[:90]}",
+                                body=f"💰 {ad.get('price') or ''}{score_txt}{kw_txt}",
+                                link=ad.get("link"),
+                                monitor_id=m["id"],
+                                conn=conn_w,
+                            )
+                    conn_w.commit()
+                finally:
+                    conn_w.close()
+
+                stats["new_ads"] += len(new_ads)
+                if new_ads:
+                    batch = new_ads[:MAX_NOTIFY_PER_RUN]
+                    extra = len(new_ads) - len(batch)
+                    lines = [f"<b>🔔 مانیتور «{m['name']}» — {len(new_ads)} آگهی جدید</b>\n"]
+                    for ad in batch:
+                        kw = f" 🎯[{','.join(ad['matched_keywords'])}]" if ad.get("matched_keywords") else ""
+                        vs = f" ⭐{int(round(ad['value_score']))}/100" if ad.get("value_score") else ""
+                        lines.append(f"• {ad['title']}{kw}{vs}\n💰 {ad['price']}\n🔗 {ad['link']}\n")
+                    if extra > 0:
+                        lines.append(f"\n... و {extra} آگهی دیگر (در پنل اعلان‌ها و تاریخچه ثبت شد)")
+
+                    first_link = batch[0].get("link") if len(batch) == 1 else "/notifications"
+                    notify(
+                        "\n".join(lines),
+                        subject=f"دیوار [{m['name']}] - {len(new_ads)} آگهی جدید",
+                        telegram_chat_id=user["telegram_chat_id"] if user else None,
+                        email=user["notify_email"] if user else None,
+                        user_id=user["id"] if user else None,
+                        link=first_link,
+                        monitor_id=m["id"],
+                        save=False,
+                    )
+            except Exception as e:
+                stats["errors"] += 1
+                print(f"Monitor {m['id']} error:", e)
+
+        try:
+            check_price_changes()
+        except Exception as e:
+            print("Price check error:", e)
+
+        conn_end = get_db()
+        try:
+            cleanup_old_records(conn_end)
+            conn_end.execute(
+                "INSERT INTO meta (key, value) VALUES ('last_monitor_run', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (datetime.now().isoformat(),),
+            )
+            conn_end.commit()
+        finally:
+            conn_end.close()
+
+        dt = time.time() - t0
+        print(
+            f"[{datetime.now().isoformat(timespec='seconds')}] monitor done in {dt:.1f}s — "
+            f"monitors={stats['monitors']} checked={stats['ads_checked']} new={stats['new_ads']} errors={stats['errors']}"
+        )
+        return stats
+    finally:
+        release_monitor_lock(lock_fh)
 
 
 if __name__ == "__main__":
-    run()
+    run_all_monitors()

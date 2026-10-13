@@ -71,7 +71,7 @@ def _err_any(e):
     return "خطای موقت سرور. لطفاً صفحه را رفرش کنید.", 500
 
 
-MAX_WORKERS = max(6, MAX_PARALLEL_DIVAR_REQUESTS * 2)
+MAX_WORKERS = max(1, min(4, MAX_PARALLEL_DIVAR_REQUESTS))
 SEARCH_SEMAPHORE = threading.Semaphore(MAX_PARALLEL_DIVAR_REQUESTS)
 
 # جزئیات هر آگهی (توضیحات، امکانات و مشخصات) در هر جستجو چندبار لازم می‌شود.
@@ -89,8 +89,64 @@ DESC_CACHE_LOCK = POST_DETAILS_CACHE_LOCK
 DESC_CACHE_TTL = POST_DETAILS_CACHE_TTL
 
 # همه‌ی درخواست‌های جزئیات هم همان سقف هم‌زمانی API دیوار را رعایت می‌کنند.
-DETAIL_FETCH_WORKERS = max(1, min(5, MAX_PARALLEL_DIVAR_REQUESTS))
+DETAIL_FETCH_WORKERS = max(1, min(3, MAX_PARALLEL_DIVAR_REQUESTS))
 ALL_CITY_VALUES = {"all", "all_cities", "all-cities", "allcities", "*", "0"}
+_WORKER_TLS = threading.local()
+
+
+def _in_worker_thread() -> bool:
+    return bool(getattr(_WORKER_TLS, "in_worker", False)) or (
+        threading.current_thread() is not threading.main_thread()
+    )
+
+
+def _call_in_worker(fn, *args, **kwargs):
+    prev = getattr(_WORKER_TLS, "in_worker", False)
+    _WORKER_TLS.in_worker = True
+    try:
+        return fn(*args, **kwargs)
+    finally:
+        _WORKER_TLS.in_worker = prev
+
+
+def _run_bounded_parallel(fn, items, max_workers: int = 4):
+    """اجرای موازی امن با سقف ترد محدود و fallback خودکار به اجرای ترتیبی.
+
+    در هاست‌های اشتراکی (cPanel / CloudLinux LVE) سقف NPROC محدود است و ساخت
+    ThreadPoolExecutor تو در تو باعث ``RuntimeError: can't start new thread`` و
+    ``fork() failed`` می‌شود. اگر داخل یک worker thread باشیم یا سیستم اجازه ساخت
+    ترد جدید ندهد، آیتم‌ها بدون خطا و بدون حذف هیچ مدلی در همان ترد اجرا می‌شوند.
+    """
+    seq = list(items)
+    if not seq:
+        return []
+    workers = max(1, min(int(max_workers or 1), len(seq), 4))
+    if workers <= 1 or _in_worker_thread():
+        return [fn(item) for item in seq]
+
+    results = []
+    submitted_indices = set()
+    try:
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            future_map = {}
+            for idx, item in enumerate(seq):
+                try:
+                    fut = ex.submit(_call_in_worker, fn, item)
+                    future_map[fut] = idx
+                    submitted_indices.add(idx)
+                except RuntimeError:
+                    break
+            for fut in as_completed(future_map):
+                results.append((future_map[fut], fut.result()))
+    except RuntimeError:
+        pass
+
+    for idx, item in enumerate(seq):
+        if idx not in submitted_indices:
+            results.append((idx, fn(item)))
+
+    results.sort(key=lambda pair: pair[0])
+    return [val for _, val in results]
 
 LAST_SEARCH: Dict[int, float] = {}
 LAST_SEARCH_LOCK = threading.Lock()
@@ -741,25 +797,38 @@ HEADERS = {
 }
 
 # ====================== دیتابیس ======================
-def get_db():
-    """اتصال به SQLite — پوشه ساخته می‌شود؛ بدون WAL (امن برای هاست اشتراکی)."""
-    db_path = DATABASE_PATH
-    parent = os.path.dirname(os.path.abspath(db_path))
+_LOCAL_DB_FALLBACK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "divar.db")
+_RESOLVED_DB_CACHE: Dict[str, str] = {}
+_INITIALIZED_DB_PATHS = set()
+
+
+def _resolve_db_path() -> str:
+    configured = str(DATABASE_PATH or _LOCAL_DB_FALLBACK)
+    if configured in _RESOLVED_DB_CACHE:
+        return _RESOLVED_DB_CACHE[configured]
+    parent = os.path.dirname(os.path.abspath(configured))
     if parent and not os.path.isdir(parent):
         try:
             os.makedirs(parent, exist_ok=True)
             print(f"[DB] created directory: {parent}")
+            _RESOLVED_DB_CACHE[configured] = configured
+            return configured
         except Exception as e:
             print(f"[DB] cannot create directory {parent}: {e}")
-            fallback = os.path.join(os.path.dirname(os.path.abspath(__file__)), "divar.db")
-            print(f"[DB] falling back to {fallback}")
-            db_path = fallback
+            print(f"[DB] falling back to {_LOCAL_DB_FALLBACK}")
+            _RESOLVED_DB_CACHE[configured] = _LOCAL_DB_FALLBACK
+            return _LOCAL_DB_FALLBACK
+    _RESOLVED_DB_CACHE[configured] = configured
+    return configured
+
+
+def get_db():
+    """اتصال به SQLite — پوشه ساخته می‌شود؛ بدون WAL (امن برای هاست اشتراکی)."""
+    db_path = _resolve_db_path()
     # timeout جلوگیری از قفل ابدی؛ check_same_thread برای Flask
     conn = sqlite3.connect(db_path, timeout=30, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     try:
-        # DELETE امن‌تر از WAL روی cPanel / NFS / shared hosting است
-        conn.execute("PRAGMA journal_mode=DELETE")
         conn.execute("PRAGMA busy_timeout=30000")
         conn.execute("PRAGMA foreign_keys=ON")
         conn.execute("PRAGMA synchronous=NORMAL")
@@ -779,13 +848,21 @@ def ensure_admin(conn):
         print(f"[INIT] Admin account created -> username: {ADMIN_USERNAME} password: {ADMIN_PASSWORD} (CHANGE THIS)")
 
 
-def init_db():
+def init_db(force: bool = False):
     """ایجاد کامل جداول، مایگریشن، ادمین و داده‌های پیش‌فرض — از صفر هم کار می‌کند."""
+    resolved_path = _resolve_db_path()
+    if not force and resolved_path in _INITIALIZED_DB_PATHS and os.path.exists(resolved_path):
+        return
     try:
         conn = get_db()
     except Exception as e:
         print("[INIT] FATAL cannot open database:", e)
         return
+
+    try:
+        conn.execute("PRAGMA journal_mode=DELETE")
+    except Exception:
+        pass
 
     try:
         conn.executescript(
@@ -815,14 +892,15 @@ def init_db():
                 created_at TEXT
             );
             CREATE TABLE IF NOT EXISTS seen_ads (
-                token TEXT PRIMARY KEY,
-                monitor_id INTEGER,
+                token TEXT NOT NULL,
+                monitor_id INTEGER NOT NULL DEFAULT 0,
                 title TEXT,
                 price TEXT,
                 price_num INTEGER,
                 link TEXT,
                 found_at TEXT,
-                last_checked TEXT
+                last_checked TEXT,
+                PRIMARY KEY (monitor_id, token)
             );
             CREATE TABLE IF NOT EXISTS history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -925,6 +1003,40 @@ def init_db():
         if "last_checked" not in cols2:
             conn.execute("ALTER TABLE seen_ads ADD COLUMN last_checked TEXT")
 
+        # مایگریشن seen_ads از کلید سراسری (token) به کلید ترکیبی (monitor_id, token)
+        # تا مانیتورهای مختلف یکدیگر را مسدود نکنند و خطای UNIQUE رخ ندهد.
+        seen_sql_row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='seen_ads'"
+        ).fetchone()
+        seen_sql = (seen_sql_row[0] or "") if seen_sql_row else ""
+        if "PRIMARY KEY (monitor_id, token)" not in seen_sql:
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS seen_ads_new (
+                    token TEXT NOT NULL,
+                    monitor_id INTEGER NOT NULL DEFAULT 0,
+                    title TEXT,
+                    price TEXT,
+                    price_num INTEGER,
+                    link TEXT,
+                    found_at TEXT,
+                    last_checked TEXT,
+                    PRIMARY KEY (monitor_id, token)
+                );
+                INSERT OR IGNORE INTO seen_ads_new (
+                    token, monitor_id, title, price, price_num, link, found_at, last_checked
+                )
+                SELECT
+                    token, COALESCE(monitor_id, 0), title, price, price_num, link, found_at, last_checked
+                FROM seen_ads
+                WHERE token IS NOT NULL;
+                DROP TABLE seen_ads;
+                ALTER TABLE seen_ads_new RENAME TO seen_ads;
+                """
+            )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_seen_ads_token ON seen_ads(token)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_seen_ads_monitor ON seen_ads(monitor_id, found_at)")
+
         history_cols = [r[1] for r in conn.execute("PRAGMA table_info(history)").fetchall()]
         if "value_score" not in history_cols:
             conn.execute("ALTER TABLE history ADD COLUMN value_score REAL")
@@ -973,6 +1085,7 @@ def init_db():
         conn.close()
     except Exception:
         pass
+    _INITIALIZED_DB_PATHS.add(resolved_path)
     print("[INIT] database ready")
 
 
@@ -1471,14 +1584,36 @@ def is_model_match(title: str, model: str) -> bool:
     title_compact = title_n.replace(" ", "")
     model_compact = model_n.replace(" ", "")
 
+    # حذف حجم موتور (مثلاً 1700cc / 2000cc) و سال داخل پرانتز مثل (2020)
+    # تا به اشتباه به‌عنوان شماره مدل اجباری در عنوان در نظر گرفته نشود.
+    model_for_nums = re.sub(r"\b\d{3,4}\s*cc\b", " ", model_n)
+    model_for_nums = re.sub(r"\(\s*20\d{2}\s*\)", " ", model_for_nums)
+    if "tondar 90" in model_n and any(k in title_n for k in ("تندر", "ال 90", "ال90", "ال نود", "l90")):
+        return True
+
     # ---- شماره/کد مدل ----
-    model_nums = re.findall(r"\d{2,4}", model_n)
+    model_nums = re.findall(r"\d{2,4}", model_for_nums)
     model_nums = sorted(set(model_nums), key=len, reverse=True)
     if model_nums:
         main_num = model_nums[0]
         title_nums = set(re.findall(r"\d{1,4}", title_n))
         if main_num not in title_nums and main_num not in title_compact:
-            return False
+            # در خودروها گاهی فروشنده مدل دقیق را در فیلد دیوار انتخاب کرده اما در
+            # عنوان فقط «پراید مدل ۹۴ بدون رنگ» (بدون ذکر ۱۳۱) می‌نویسد. اگر برند
+            # در عنوان باشد و هیچ کد مدل متناقضی در عنوان نباشد، آگهی معتبر است.
+            car_brand_Match = False
+            car_conflict_codes = {
+                "pride": {"111", "131", "132", "141", "151"},
+                "peugeot": {"206", "207", "2008", "301", "405", "407", "508", "205"},
+            }
+            for c_brand, c_hints in (("pride", ("پراید", "pride")), ("peugeot", ("پژو", "peugeot"))):
+                if c_brand in model_n and any(h in title_n for h in c_hints):
+                    other_codes = car_conflict_codes[c_brand] - {main_num}
+                    if not any(code in title_nums or code in title_compact for code in other_codes):
+                        car_brand_Match = True
+                    break
+            if not car_brand_Match:
+                return False
 
     def _has_any(text, forms):
         tc = text.replace(" ", "")
@@ -1786,6 +1921,10 @@ def extract_post_description(payload: Dict[str, Any]) -> str:
 def _iter_detail_rows(payload: Dict[str, Any]):
     """ردیف‌های جدول مشخصات را از شکل‌های متفاوت پاسخ جزئیات استخراج می‌کند."""
     seen = set()
+    ignored_sections = {
+        "suggestion", "suggestions", "similar posts", "breadcrumb", "feedback",
+        "report", "seo", "share", "warning", "note",
+    }
 
     def walk(node: Any, depth: int = 0):
         if depth > 9 or node is None:
@@ -1795,6 +1934,10 @@ def _iter_detail_rows(payload: Dict[str, Any]):
                 yield from walk(item, depth + 1)
             return
         if not isinstance(node, dict):
+            return
+
+        sec_name = _normalize_fa_digits(str(node.get("section_name") or node.get("widget_type") or ""))
+        if sec_name in ignored_sections:
             return
 
         label = node.get("title") or node.get("label") or node.get("name") or node.get("key")
@@ -1813,7 +1956,9 @@ def _iter_detail_rows(payload: Dict[str, Any]):
                 seen.add(marker)
                 yield {"label": clean_label, "value": clean_value, "available": available}
 
-        for child in node.values():
+        for k, child in node.items():
+            if _normalize_fa_digits(str(k)) in ignored_sections:
+                continue
             if isinstance(child, (dict, list)):
                 yield from walk(child, depth + 1)
 
@@ -1865,11 +2010,16 @@ def extract_post_details(payload: Dict[str, Any]) -> Dict[str, Any]:
         value = row.get("value")
         value_text = str(value or "")
         normalized_label = _normalize_fa_digits(label)
+        normalized_val = _normalize_fa_digits(value_text)
         normalized_pair = _normalize_fa_digits(f"{label} {value_text}")
-        if value_text:
-            detail_parts.append(f"{label}: {value_text}")
-        else:
-            detail_parts.append(label)
+        # اگر ردیف جدول مشخصات بگوید «معاوضه: ندارد» یا «اقساط: خیر»، نباید کلمه
+        # «معاوضه» یا «اقساط» وارد detail_text شود و باعث حذف کاذب آگهی با کلمه منفی گردد.
+        is_negated_row = normalized_val in {"ندارد", "خیر", "نیست", "false", "no"}
+        if not (is_negated_row and any(w in normalized_label for w in ("معاوضه", "اقساط", "قسط"))):
+            if value_text:
+                detail_parts.append(f"{label}: {value_text}")
+            elif row.get("available") is not False:
+                detail_parts.append(label)
 
         feature_key = None
         if "آسانسور" in normalized_pair or "elevator" in normalized_pair:
@@ -1893,15 +2043,19 @@ def extract_post_details(payload: Dict[str, Any]) -> Dict[str, Any]:
         elif "وضعیت بدنه" in normalized_label or normalized_label in {"بدنه", "body status"}:
             attrs["body_status_detail"] = value_text or label
         elif "شاسی" in normalized_label or "chassis" in normalized_label:
-            attrs["chassis_status_detail"] = value_text or label
+            val_or_label = value_text or label
+            if not attrs["chassis_status_detail"]:
+                attrs["chassis_status_detail"] = val_or_label
+            elif val_or_label not in attrs["chassis_status_detail"]:
+                attrs["chassis_status_detail"] = f"{attrs['chassis_status_detail']} | {val_or_label}"
 
         if "ودیعه" in normalized_label or normalized_label.startswith("رهن"):
-            amount = parse_money_amount(value_text)
-            if amount is not None:
+            amount = 0 if any(w in normalized_val for w in ("مجانی", "رایگان")) else parse_money_amount(value_text)
+            if amount is not None and attrs["credit_num"] is None:
                 attrs["credit_num"] = amount
         elif "اجاره" in normalized_label or "rent" in normalized_label:
-            amount = parse_money_amount(value_text)
-            if amount is not None:
+            amount = 0 if any(w in normalized_val for w in ("مجانی", "رایگان")) else parse_money_amount(value_text)
+            if amount is not None and attrs["rent_num"] is None:
                 attrs["rent_num"] = amount
         elif (
             attrs["price_num"] is None
@@ -2229,38 +2383,45 @@ def _merge_post_details(ad: Dict[str, Any], details: Dict[str, Any]) -> Dict[str
     return ad
 
 
-def hydrate_ads_with_details(ads: List[Dict]) -> List[Dict]:
-    """همه‌ی آگهی‌های خروجی را با توضیحات و مشخصات detail کامل می‌کند.
-
-    این کار عمداً سقفِ تعداد ندارد: کلمات کلیدی/منفی و امتیازدهی باید برای
-    تمام نتیجه‌های نمایش‌داده‌شده یکسان عمل کنند، نه فقط ۲۰ یا ۲۵ مورد اول.
-    هم‌زمانی و cache از فشار غیرضروری به API جلوگیری می‌کنند.
-    """
+def hydrate_ads_with_details(ads: List[Dict], max_fetch: Optional[int] = None) -> List[Dict]:
+    """آگهی‌ها را با توضیحات و مشخصات detail کامل می‌کند (با اجرای موازی امن و بدون ترد تو در تو)."""
     if not ads:
         return ads
     by_token: Dict[str, List[Dict]] = {}
     for ad in ads:
+        if ad.get("details_loaded"):
+            ad.setdefault("description", "")
+            continue
         token = str(ad.get("token") or "").strip()
         if token:
             by_token.setdefault(token, []).append(ad)
         else:
             ad.setdefault("description", "")
 
-    def load(token: str):
-        return token, get_post_details_cached(token)
+    if not by_token:
+        return ads
 
-    workers = min(DETAIL_FETCH_WORKERS, len(by_token))
-    if workers <= 1:
-        results = [load(token) for token in by_token]
-    else:
-        results = []
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = [executor.submit(load, token) for token in by_token]
-            for future in as_completed(futures):
-                try:
-                    results.append(future.result())
-                except Exception as exc:
-                    print("[divar] detail worker failed:", type(exc).__name__)
+    tokens = list(by_token.keys())
+    if max_fetch is not None and max_fetch >= 0 and len(tokens) > max_fetch:
+        # ابتدا توکن‌هایی که در کش هستند را بدون محدودیت برمی‌داریم
+        cached_tokens = []
+        uncached_tokens = []
+        with POST_DETAILS_CACHE_LOCK:
+            for t in tokens:
+                if t in POST_DETAILS_CACHE:
+                    cached_tokens.append(t)
+                else:
+                    uncached_tokens.append(t)
+        tokens = cached_tokens + uncached_tokens[:max_fetch]
+
+    def load(token: str):
+        try:
+            return token, get_post_details_cached(token)
+        except Exception as exc:
+            print("[divar] detail worker failed:", type(exc).__name__)
+            return token, {}
+
+    results = _run_bounded_parallel(load, tokens, max_workers=DETAIL_FETCH_WORKERS)
 
     for token, details in results:
         for ad in by_token.get(token, []):
@@ -2268,16 +2429,18 @@ def hydrate_ads_with_details(ads: List[Dict]) -> List[Dict]:
     return ads
 
 
-def hydrate_ads_with_missing_prices(ads: List[Dict]) -> List[Dict]:
-    """فقط کارت‌های بی‌قیمت را از detail کامل می‌کند.
-
-    بعضی POST_ROWهای موبایل/خودرو قیمت را در payload جست‌وجو ندارند اما آن را
-    در webengage detail دارند. این fetch محدود، قبل از میانگین‌گیری/فیلتر
-    هوشمند انجام می‌شود تا آن کارت‌ها حذف یا با قیمت خالی نمایش داده نشوند.
-    """
-    missing = [ad for ad in ads if ad.get("price_num") is None and ad.get("token")]
+def hydrate_ads_with_missing_prices(ads: List[Dict], max_fetch: int = 12) -> List[Dict]:
+    """فقط کارت‌های بی‌قیمت (غیر از توافقی/معاوضه صریح) را با سقف معقول از detail کامل می‌کند."""
+    missing = []
+    for ad in ads:
+        if ad.get("price_num") is not None or not ad.get("token"):
+            continue
+        raw_p = _normalize_fa_digits(str(ad.get("price_raw") or ad.get("price") or ""))
+        if any(w in raw_p for w in ("توافقی", "معاوضه")):
+            continue
+        missing.append(ad)
     if missing:
-        hydrate_ads_with_details(missing)
+        hydrate_ads_with_details(missing, max_fetch=max_fetch)
     return ads
 
 
@@ -2285,7 +2448,7 @@ def _ad_search_text(ad: Dict[str, Any]) -> str:
     return " ".join(
         str(ad.get(key) or "")
         for key in (
-            "title", "status", "description", "description_search_text", "detail_text",
+            "title", "status", "red_text", "description", "description_search_text", "detail_text",
             "body_status_detail", "chassis_status_detail",
         )
     )
@@ -2330,28 +2493,45 @@ def keyword_match_sources(ad: Dict[str, Any], keywords: List[str]) -> Dict[str, 
     return matches
 
 
+def _strip_negated_occurrences(normalized_text: str, normalized_keyword: str) -> str:
+    """عبارت‌های نفی‌شده مثل «معاوضه ندارم» یا «تعمیری نیست» را پیش از بررسی منفی حذف می‌کند."""
+    if not normalized_text or not normalized_keyword:
+        return normalized_text
+    kw_esc = re.escape(normalized_keyword)
+    cleaned = re.sub(
+        rf"{kw_esc}\s*(?::|\s)*\s*(?:ندارم|نداریم|ندارد|نمیشود|نمی شود|نمی کنم|نمیکنم|نیست|خیر|ممنوع)",
+        " ",
+        normalized_text,
+    )
+    cleaned = re.sub(rf"(?:بدون|فاقد)\s+{kw_esc}", " ", cleaned)
+    return cleaned
+
+
 def has_negative_keyword(text: str, negative_keywords: List[str]) -> bool:
     if not text or not negative_keywords:
         return False
     normalized_text = _normalize_fa_digits(text)
-    return any(
-        (normalized_keyword := _normalize_fa_digits(keyword)) and normalized_keyword in normalized_text
-        for keyword in negative_keywords
-        if str(keyword).strip()
-    )
+    for keyword in negative_keywords:
+        if not str(keyword).strip():
+            continue
+        normalized_keyword = _normalize_fa_digits(keyword)
+        if not normalized_keyword:
+            continue
+        cleaned_text = _strip_negated_occurrences(normalized_text, normalized_keyword)
+        if normalized_keyword in cleaned_text:
+            return True
+    return False
 
 
 def filter_negative_keywords(ads: List[Dict], negative_keywords: List[str], max_fetch: Optional[int] = None) -> List[Dict]:
-    """فیلتر منفی روی عنوان *و توضیحات کامل* تمام آگهی‌ها اعمال می‌شود.
-
-    ``max_fetch`` فقط برای سازگاری امضای قدیمی نگه داشته شده و عمداً نادیده
-    گرفته می‌شود؛ محدود کردن آن علت اصلی رد نشدن برخی آگهی‌ها بود.
-    """
+    """فیلتر منفی روی عنوان *و توضیحات کامل* تمام آگهی‌ها اعمال می‌شود."""
     negative_keywords = [str(keyword).strip() for keyword in (negative_keywords or []) if str(keyword).strip()]
     if not negative_keywords:
         return ads
-    hydrate_ads_with_details(ads)
-    return [ad for ad in ads if not has_negative_keyword(_ad_search_text(ad), negative_keywords)]
+    # ابتدا آگهی‌هایی که همین الان در عنوان/وضعیت کلمه منفی دارند را بدون درخواست شبکه حذف می‌کنیم
+    survivors = [ad for ad in ads if not has_negative_keyword(_ad_search_text(ad), negative_keywords)]
+    hydrate_ads_with_details(survivors, max_fetch=max_fetch)
+    return [ad for ad in survivors if not has_negative_keyword(_ad_search_text(ad), negative_keywords)]
 
 
 def enrich_ads_with_keywords(ads: List[Dict], keywords: List[str], max_fetch: Optional[int] = None) -> List[Dict]:
@@ -2583,7 +2763,10 @@ def _signal_hits(text: str, signals: List[str]) -> List[str]:
     hits = []
     for s in signals:
         sn = _normalize_fa_digits(s)
-        if sn and sn in t:
+        if not sn:
+            continue
+        cleaned = _strip_negated_occurrences(t, sn)
+        if sn in cleaned:
             hits.append(s)
     return hits
 
@@ -2641,15 +2824,25 @@ def evaluate_car_condition(ad: Dict, desc: str = "") -> Dict[str, Any]:
         notes.append("تمام‌رنگ −۱۰٪")
     else:
         paint_patterns = (
-            ("سقف رنگ", ["سقف رنگ", "رنگ سقف", "roof paint"]),
-            ("کاپوت رنگ", ["کاپوت رنگ", "رنگ کاپوت", "hood paint"]),
-            ("صندوق رنگ", ["صندوق رنگ", "رنگ صندوق", "درب صندوق رنگ", "trunk paint"]),
-            ("ستون رنگ", ["ستون رنگ", "رنگ ستون", "pillar paint"]),
-            ("درب رنگ", ["درب رنگ", "رنگ درب", "در رنگ", "door paint"]),
-            ("گلگیر رنگ", ["گلگیر رنگ", "رنگ گلگیر", "fender paint"]),
+            ("سقف رنگ", "سقف", ["سقف رنگ", "رنگ سقف", "roof paint"]),
+            ("کاپوت رنگ", "کاپوت", ["کاپوت رنگ", "رنگ کاپوت", "hood paint"]),
+            ("صندوق رنگ", "صندوق", ["صندوق رنگ", "رنگ صندوق", "درب صندوق رنگ", "trunk paint"]),
+            ("ستون رنگ", "ستون", ["ستون رنگ", "رنگ ستون", "pillar paint"]),
+            ("درب رنگ", "درب", ["درب رنگ", "رنگ درب", "درب ها رنگ", "درب‌ها رنگ", "door paint"]),
+            ("گلگیر رنگ", "گلگیر", ["گلگیر رنگ", "رنگ گلگیر", "fender paint"]),
         )
-        for name, patterns in paint_patterns:
-            if _has_any_phrase(source, patterns):
+        for name, part_word, patterns in paint_patterns:
+            negated_part = _has_any_phrase(
+                source,
+                [
+                    f"{part_word} بدون رنگ",
+                    f"{part_word} بی رنگ",
+                    f"{part_word} رنگ نشده",
+                    f"{part_word} رنگ ندارد",
+                    f"{part_word} رنگ فابریک",
+                ],
+            )
+            if not negated_part and _has_any_phrase(source, patterns):
                 deduction = CAR_PAINT_VALUE_DEDUCTIONS[name]
                 paint_deduction += deduction
                 notes.append(f"{name} −{int(deduction)}٪")
@@ -2663,26 +2856,41 @@ def evaluate_car_condition(ad: Dict, desc: str = "") -> Dict[str, Any]:
                 notes.append("چند لکه رنگ −۶٪")
 
     # «شاسی رنگ» با «شاسی ضربه» متفاوت است و هر کدام قواعد خود را دارد.
-    if _has_any_phrase(source, ["شاسی رنگ", "رنگ شاسی", "chassis paint"]):
+    if not _has_any_phrase(source, ["شاسی بدون رنگ", "شاسی بی رنگ", "شاسی رنگ نشده", "شاسی رنگ ندارد"]) and _has_any_phrase(
+        source, ["شاسی رنگ", "رنگ شاسی", "chassis paint"]
+    ):
         chassis_paint_deduction = CAR_PAINT_VALUE_DEDUCTIONS["شاسی رنگ"]
         notes.append("شاسی رنگ −۹٪")
 
     chassis_damage_count = 0
+    front_hit = _has_any_phrase(source, ["شاسی جلو ضربه", "ضربه شاسی جلو", "جلو ضربه", "front damage", "front-damage"])
+    rear_hit = _has_any_phrase(source, ["شاسی عقب ضربه", "ضربه شاسی عقب", "عقب ضربه", "back damage", "back-damage"])
     both_damage = (
         "both-damage" in chassis_code
         or "both damage" in chassis_code
-        or _has_any_phrase(source, ["هر دو شاسی ضربه", "دو شاسی ضربه", "شاسی جلو و عقب", "both chassis damage"])
+        or (front_hit and rear_hit)
+        or _has_any_phrase(
+            source,
+            ["هر دو شاسی ضربه", "دو شاسی ضربه", "شاسی جلو و عقب ضربه", "ضربه شاسی جلو و عقب", "both chassis damage"],
+        )
     )
     if both_damage:
         chassis_damage_count = 2
     elif (
-        "front-damage" in chassis_code
-        or "back-damage" in chassis_code
-        or "front damage" in chassis_code
-        or "back damage" in chassis_code
-        or "جلو ضربه" in chassis_code
-        or "عقب ضربه" in chassis_code
-        or _has_any_phrase(source, ["شاسی ضربه", "ضربه شاسی", "شاسی جلو", "شاسی عقب", "جلو ضربه", "عقب ضربه", "chassis damage"])
+        front_hit
+        or rear_hit
+        or _has_any_phrase(
+            source,
+            [
+                "شاسی ضربه",
+                "ضربه شاسی",
+                "ضربه جزیی شاسی",
+                "ضربه جزئی شاسی",
+                "شاسی خورده",
+                "ضربه خورده",
+                "chassis damage",
+            ],
+        )
     ):
         chassis_damage_count = 1
     chassis_damage_deduction = chassis_damage_count * CAR_CHASSIS_DAMAGE_DEDUCTION
@@ -2850,17 +3058,18 @@ def score_ad_smart(
     priced = bool(comparison_price and baseline > 0)
     if priced:
         ratio = float(comparison_price) / baseline
+        raw_ratio = (float(price) / baseline) if (price and baseline > 0) else ratio
         min_r = cfg["min_price_ratio"]
         max_r = cfg["max_price_ratio"]
         if category in ("apartment-sell", "apartment-rent"):
             min_r = min(min_r, 0.35)
             max_r = max(max_r, 1.8)
-        if ratio < min_r or ratio > max_r:
+        if raw_ratio < min_r or raw_ratio > max_r:
             if strict_price:
                 return {
                     "value_score": 0.0,
                     "score_breakdown": breakdown,
-                    "score_reason": f"خارج از بازه قیمت معقول نسبت به بازار (نسبت {ratio:.2f})",
+                    "score_reason": f"خارج از بازه قیمت معقول نسبت به بازار (نسبت {raw_ratio:.2f})",
                     "pass_filter": False,
                     "neg_hits": [],
                     "pos_hits": [],
@@ -2875,7 +3084,7 @@ def score_ad_smart(
             if ratio <= 1.0:
                 # نزدیکِ میانگین یک امتیاز پایه دارد؛ با ارزان‌تر شدن، منحنی
                 # تخفیف اصلی سهم بزرگ‌تر را می‌گیرد.
-                near = max(0.0, 8.0 * (1.0 - max(0.0, 1.0 - ratio) / 0.12))
+                near = max(0.0, 8.0 * (1.0 - max(0.0, ratio - 0.88) / 0.12))
                 price_score = max(price_score, near)
             else:
                 over = min(12.0, (ratio - 1.0) * 40.0)
@@ -3032,6 +3241,8 @@ def ensure_ads_rated(ads: List[Dict], category: str, profile: str = "balanced", 
             pass
     global_avg = clean_avg(prices) if prices else 0.0
     for ad in ads:
+        if ad.get("_scored_by_avg") and ad.get("value_score") is not None:
+            continue
         if not force and ad.get("value_score") is not None:
             continue
         try:
@@ -3788,14 +3999,19 @@ def finalize_ads(
 ) -> List[Dict]:
     """مرحله‌ی مشترک همه‌ی دسته‌ها: detail، امتیاز و سپس کلیدواژه‌ها.
 
-    ترتیب مهم است: ابتدا توضیحات واقعی و امکانات detail خوانده می‌شوند، سپس
-    امتیاز به‌روز می‌شود و در پایان کلمات منفی/مثبت روی همان متن کامل اعمال
-    می‌گردند.
+    ترتیب مهم است: ابتدا آگهی‌های دارای کلمه منفی در عنوان حذف می‌شوند، سپس
+    توضیحات واقعی و امکانات detail خوانده می‌شوند، امتیاز به‌روز می‌شود و در
+    پایان کلمات منفی/مثبت روی همان متن کامل اعمال می‌گردند.
     """
-    hydrate_ads_with_details(ads)
+    neg_clean = [str(k).strip() for k in (negative_keywords or []) if str(k).strip()]
+    kw_clean = [str(k).strip() for k in (keywords or []) if str(k).strip()]
+    if neg_clean:
+        ads = [ad for ad in ads if not has_negative_keyword(_ad_search_text(ad), neg_clean)]
+    detail_cap = 80 if (kw_clean or neg_clean) else 35
+    hydrate_ads_with_details(ads, max_fetch=detail_cap)
     ensure_ads_rated(ads, category, smart_profile, force=True)
-    ads = filter_negative_keywords(ads, negative_keywords)
-    ads = enrich_ads_with_keywords(ads, keywords)
+    ads = filter_negative_keywords(ads, neg_clean, max_fetch=detail_cap)
+    ads = enrich_ads_with_keywords(ads, kw_clean, max_fetch=detail_cap)
     return ads
 
 
@@ -3809,18 +4025,16 @@ def process_model_smart(
     min_smart_score,
     smart_profile="balanced",
     require_details=False,
+    negative_keywords=None,
 ):
     """
     جستجوی هوشمند دو مرحله‌ای:
     ۱) گرفتن حداکثر آگهی‌ها + امتیاز سریع (عنوان/قیمت/تازگی)
-    ۲) خواندن توضیحات فقط برای برترین‌ها و امتیاز نهایی
+    ۲) خواندن توضیحات فقط برای برترین‌های معتبر قیمتی و امتیاز نهایی
     """
     try:
         profile = smart_profile if smart_profile in SMART_PROFILES else "balanced"
         cfg = SMART_PROFILES[profile]
-        # آستانه = حداکثرِ (حداقل پروفایل، مقدار کاربر)
-        # یعنی کاربر با عدد بالاتر می‌تواند سخت‌گیرانه‌تر کند؛ با عدد پایین‌تر هم نمی‌تواند از کف پروفایل رد شود
-        # مگر اینکه صریحاً پروفایل open باشد و کاربر عدد کم بگذارد
         user_min = float(min_smart_score) if min_smart_score not in (None, "") else cfg["min_score"]
         try:
             user_min = float(user_min)
@@ -3849,12 +4063,10 @@ def process_model_smart(
         ads = extract_ads(raw, category)
         # فیلتر دقیق مدل — جلوگیری از قاطی شدن مدل‌های دیگر
         ads = [a for a in ads if is_model_match(a.get("title") or "", model)]
-        # وقتی کلمه‌ی کلیدی/منفی داریم، توضیحات باید قبل از رتبه‌بندی تمام
-        # کاندیداها خوانده شود؛ محدود کردن به top-N باعث خطای قبلی می‌شد.
-        if require_details:
-            hydrate_ads_with_details(ads)
-        else:
-            hydrate_ads_with_missing_prices(ads)
+        if negative_keywords:
+            ads = [a for a in ads if not has_negative_keyword(_ad_search_text(a), negative_keywords)]
+
+        hydrate_ads_with_missing_prices(ads, max_fetch=8)
         prices = [a["price_num"] for a in ads if a.get("price_num")]
         if not prices:
             return model, None, []
@@ -3863,7 +4075,7 @@ def process_model_smart(
         if avg <= 0:
             return model, None, []
 
-        # مرحله ۱: امتیاز سریع بدون توضیحات
+        # مرحله ۱: امتیاز سریع بدون توضیحات (فقط آگهی‌های داخل بازه قیمت معقول)
         phase1 = []
         for ad in ads:
             if not ad.get("price_num"):
@@ -3872,11 +4084,13 @@ def process_model_smart(
             ad.update(result)
             ad["model_avg"] = int(avg)
             ad["smart_profile"] = profile
+            if result.get("pass_filter") is False and (result.get("value_score") or 0) <= 0:
+                continue
             phase1.append(ad)
 
         phase1.sort(key=lambda x: x.get("value_score") or 0, reverse=True)
 
-        # مرحله ۲: عمیق‌سازی روی برترین‌ها
+        # مرحله ۲: عمیق‌سازی روی کاندیداهای برتر (بدون ترد تو در تو)
         deep_n = min(cfg["deep_fetch"], len(phase1))
         for ad in phase1[:deep_n]:
             try:
@@ -3884,12 +4098,20 @@ def process_model_smart(
                 _merge_post_details(ad, details)
             except Exception:
                 pass
+            if negative_keywords and has_negative_keyword(_ad_search_text(ad), negative_keywords):
+                ad["value_score"] = 0.0
+                ad["pass_filter"] = False
+                continue
             desc = ad.get("description") or ""
             if desc or ad.get("detail_text"):
                 ad["_desc"] = desc[:500]
                 result = score_ad_smart(ad, avg, category, profile, desc=desc)
                 ad.update(result)
 
+        phase1 = [
+            a for a in phase1
+            if not (negative_keywords and has_negative_keyword(_ad_search_text(a), negative_keywords))
+        ]
         phase1.sort(key=lambda x: x.get("value_score") or 0, reverse=True)
 
         # فیلتر نهایی بر اساس آستانه
@@ -3902,12 +4124,13 @@ def process_model_smart(
                 a for a in phase1
                 if a not in best
                 and a.get("price_num")
-                and a["price_num"] <= avg * 0.95
-                and (a.get("value_score") or 0) >= max(3.0, effective_min * 0.6)
+                and a["price_num"] <= avg * 0.96
+                and (a.get("value_score") or 0) >= max(25.0, effective_min * 0.6)
             ]
             for a in extra[: max(4, 6 - len(best))]:
                 if not a.get("score_reason"):
                     a["score_reason"] = "نزدیک میانگین / فرصت قابل بررسی"
+                a["_smart_fallback"] = True
                 best.append(a)
 
         # پاکسازی فیلد داخلی
@@ -3975,7 +4198,7 @@ def process_model_avg(model, category, city_ids, recent_ads, data):
             raw = search_divar(payload)
         ads = extract_ads(raw, category)
         ads = [a for a in ads if is_model_match(a.get("title") or "", model)]
-        hydrate_ads_with_missing_prices(ads)
+        hydrate_ads_with_missing_prices(ads, max_fetch=8)
         prices = [a["price_num"] for a in ads if a.get("price_num")]
         if not prices:
             return model, None, []
@@ -3993,6 +4216,7 @@ def process_model_avg(model, category, city_ids, recent_ads, data):
                 disc = (avg - pn) / avg
                 a["value_score"] = round(min(90.0, 40.0 + disc * 100.0), 1)
                 a["score_reason"] = f"قیمت {int(disc*100)}٪ زیر میانگین بازار ({int(avg):,})"
+                a["_scored_by_avg"] = True
                 picked.append(a)
         picked.sort(key=lambda x: x.get("price_num") or 0)
         return model, int(avg), picked
@@ -4050,7 +4274,7 @@ def process_model_normal(model, category, city_ids, recent_ads, data):
         ads = extract_ads(raw, category)
         # فیلتر دقیق مدل تا مدل‌های هم‌خانواده قاطی نشوند
         ads = [a for a in ads if is_model_match(a.get("title") or "", model)]
-        hydrate_ads_with_missing_prices(ads)
+        hydrate_ads_with_missing_prices(ads, max_fetch=8)
         prices = [a.get("price_num") for a in ads if a.get("price_num")]
         avg = clean_avg(prices) if prices else 0.0
         # حتی جست‌وجوی عادی هم امتیاز هر آگهی را برمی‌گرداند؛ جزئیات کامل‌تر
@@ -4102,6 +4326,7 @@ def process_real_estate(
     min_smart_score=55,
     smart_profile="balanced",
     require_details=False,
+    negative_keywords=None,
 ):
     """جستجوی یک‌مرحله‌ای املاک (بدون مدل)."""
     try:
@@ -4115,10 +4340,9 @@ def process_real_estate(
         with SEARCH_SEMAPHORE:
             raw = search_divar(payload, max_pages=15, max_ads=250)
         ads = extract_ads(raw, category)
-        if require_details:
-            hydrate_ads_with_details(ads)
-        else:
-            hydrate_ads_with_missing_prices(ads)
+        if negative_keywords:
+            ads = [a for a in ads if not has_negative_keyword(_ad_search_text(a), negative_keywords)]
+        hydrate_ads_with_missing_prices(ads, max_fetch=12)
 
         prices = [a["price_num"] for a in ads if a.get("price_num")]
         avg_for_all = clean_avg(prices) if prices else 0.0
@@ -4144,6 +4368,7 @@ def process_real_estate(
             for a in ads:
                 a["value_score"] = 50.0
                 a["score_reason"] = "امتیاز پایه (نمونه قیمت ناکافی)"
+                a["_smart_fallback"] = True
             return {"count": len(ads), "avg": None}, ads[:60]
 
         phase1 = []
@@ -4173,6 +4398,8 @@ def process_real_estate(
                     _merge_post_details(ad, get_post_details_cached(ad["token"]))
             except Exception:
                 pass
+            if negative_keywords and has_negative_keyword(_ad_search_text(ad), negative_keywords):
+                continue
             desc = ad.get("description") or ""
             rescored = score_ad_smart(ad, avg, category, smart_profile, desc=desc)
             if not rescored:
@@ -4181,13 +4408,20 @@ def process_real_estate(
             merged.update(rescored)
             merged["market_avg"] = int(avg)
             if (merged.get("value_score") or 0) >= effective_min:
+                if effective_min < min_smart_score:
+                    merged["_smart_fallback"] = True
                 out.append(merged)
         for ad in phase1[deep_n:]:
             if (ad.get("value_score") or 0) >= effective_min:
+                if effective_min < min_smart_score:
+                    ad["_smart_fallback"] = True
                 out.append(ad)
         # اگر هنوز خیلی کم بود، top بدون آستانه سخت
         if len(out) < 5 and phase1:
-            out = phase1[: min(25, len(phase1))]
+            for a in phase1[: min(25, len(phase1))]:
+                if a not in out:
+                    a["_smart_fallback"] = True
+                    out.append(a)
         out.sort(key=lambda x: -(x.get("value_score") or 0))
         return {"avg": int(avg), "count": len(ads)}, out[:80]
     except Exception as e:
@@ -4241,6 +4475,7 @@ def run_search_logic(data: dict) -> dict:
             min_smart_score=min_smart_score,
             smart_profile=smart_profile,
             require_details=bool(keywords or negative_keywords),
+            negative_keywords=negative_keywords,
         )
         ads = finalize_ads(ads, keywords, negative_keywords, category, smart_profile)
         if smart_search:
@@ -4251,7 +4486,18 @@ def run_search_logic(data: dict) -> dict:
             floor = SMART_PROFILES.get(smart_profile, SMART_PROFILES["balanced"])["min_score"]
             final_min = max(float(floor), float(gmin))
             before = len(ads)
-            ads = [a for a in ads if (a.get("value_score") or 0) >= final_min]
+            strict_ads = [a for a in ads if (a.get("value_score") or 0) >= final_min]
+            if len(strict_ads) < 3 and ads:
+                fallback_floor = max(25.0, final_min * 0.6)
+                fallbacks = [
+                    a for a in ads
+                    if a not in strict_ads
+                    and (a.get("_smart_fallback") or (a.get("value_score") or 0) >= fallback_floor)
+                ]
+                strict_ads.extend(fallbacks[: max(0, 6 - len(strict_ads))])
+            for a in strict_ads:
+                a.pop("_smart_fallback", None)
+            ads = strict_ads
             ads.sort(key=lambda x: (-(x.get("value_score") or 0), not x.get("has_keyword", False)))
             return {
                 "success": True, "count": len(ads), "ads": ads,
@@ -4274,23 +4520,22 @@ def run_search_logic(data: dict) -> dict:
 
     if smart_search:
         model_info = {}
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-            futures = [
-                ex.submit(
-                    process_model_smart, m, category, city_ids, recent_ads,
-                    data.get("business_type", "ALL"), min_smart_score, smart_profile,
-                    bool(keywords or negative_keywords),
-                )
-                for m in models_to_search
-            ]
-            for fut in as_completed(futures):
-                model, info, best = fut.result()
-                if info:
-                    model_info[model] = info
-                for ad in best:
-                    if ad["token"] not in seen:
-                        seen.add(ad["token"])
-                        all_ads.append(ad)
+        worker_results = _run_bounded_parallel(
+            lambda m: process_model_smart(
+                m, category, city_ids, recent_ads,
+                data.get("business_type", "ALL"), min_smart_score, smart_profile,
+                bool(keywords or negative_keywords), negative_keywords,
+            ),
+            models_to_search,
+            max_workers=MAX_WORKERS,
+        )
+        for model, info, best in worker_results:
+            if info:
+                model_info[model] = info
+            for ad in best:
+                if ad["token"] not in seen:
+                    seen.add(ad["token"])
+                    all_ads.append(ad)
 
         all_ads = finalize_ads(all_ads, keywords, negative_keywords, category, smart_profile)
         # فیلتر سراسری نهایی — تضمین می‌کند پروفایل/حداقل امتیاز واقعاً اعمال شود
@@ -4301,7 +4546,18 @@ def run_search_logic(data: dict) -> dict:
         profile_floor = SMART_PROFILES.get(smart_profile, SMART_PROFILES["balanced"])["min_score"]
         final_min = max(float(profile_floor), float(global_min))
         before_cnt = len(all_ads)
-        all_ads = [a for a in all_ads if (a.get("value_score") or 0) >= final_min]
+        strict_ads = [a for a in all_ads if (a.get("value_score") or 0) >= final_min]
+        if len(strict_ads) < 3 and all_ads:
+            fallback_floor = max(25.0, final_min * 0.6)
+            fallbacks = [
+                a for a in all_ads
+                if a not in strict_ads
+                and (a.get("_smart_fallback") or (a.get("value_score") or 0) >= fallback_floor)
+            ]
+            strict_ads.extend(fallbacks[: max(0, 6 - len(strict_ads))])
+        for a in strict_ads:
+            a.pop("_smart_fallback", None)
+        all_ads = strict_ads
         # مرتب‌سازی: امتیاز هوشمند اول، بعد کلمات کلیدی
         all_ads.sort(key=lambda x: (-(x.get("value_score") or 0), not x.get("has_keyword", False)))
         return {
@@ -4314,18 +4570,22 @@ def run_search_logic(data: dict) -> dict:
 
     elif smart_avg:
         model_averages = {}
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-            futures = [ex.submit(process_model_avg, m, category, city_ids, recent_ads, data) for m in models_to_search]
-            for fut in as_completed(futures):
-                model, avg, picked = fut.result()
-                if avg is not None:
-                    model_averages[model] = avg
-                for ad in picked:
-                    if ad["token"] not in seen:
-                        seen.add(ad["token"])
-                        all_ads.append(ad)
+        worker_results = _run_bounded_parallel(
+            lambda m: process_model_avg(m, category, city_ids, recent_ads, data),
+            models_to_search,
+            max_workers=MAX_WORKERS,
+        )
+        for model, avg, picked in worker_results:
+            if avg is not None:
+                model_averages[model] = avg
+            for ad in picked:
+                if ad["token"] not in seen:
+                    seen.add(ad["token"])
+                    all_ads.append(ad)
 
         all_ads = finalize_ads(all_ads, keywords, negative_keywords, category, smart_profile)
+        for a in all_ads:
+            a.pop("_scored_by_avg", None)
         return {
             "success": True, "count": len(all_ads), "ads": all_ads,
             "smart_search_enabled": False, "smart_avg_enabled": True,
@@ -4333,14 +4593,16 @@ def run_search_logic(data: dict) -> dict:
         }
 
     else:
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-            futures = [ex.submit(process_model_normal, m, category, city_ids, recent_ads, data) for m in models_to_search]
-            for fut in as_completed(futures):
-                model, _, ads = fut.result()
-                for ad in ads:
-                    if ad["token"] not in seen:
-                        seen.add(ad["token"])
-                        all_ads.append(ad)
+        worker_results = _run_bounded_parallel(
+            lambda m: process_model_normal(m, category, city_ids, recent_ads, data),
+            models_to_search,
+            max_workers=MAX_WORKERS,
+        )
+        for model, _, ads in worker_results:
+            for ad in ads:
+                if ad["token"] not in seen:
+                    seen.add(ad["token"])
+                    all_ads.append(ad)
 
         all_ads = finalize_ads(all_ads, keywords, negative_keywords, category, smart_profile)
         return {
@@ -4350,42 +4612,75 @@ def run_search_logic(data: dict) -> dict:
 
 
 # ====================== نوتیف ======================
-def send_email(subject: str, body: str, to_email: Optional[str] = None):
-    target = to_email or NOTIFY_EMAIL
+def send_email(subject: str, body: str, to_email: Optional[str] = None) -> bool:
+    target = (to_email or NOTIFY_EMAIL or "").strip()
     if not target or not SMTP_USER:
         print("Email not configured")
-        return
+        return False
+    msg = MIMEMultipart()
+    msg["From"] = SMTP_USER
+    msg["To"] = target
+    msg["Subject"] = subject
+    msg.attach(MIMEText(body, "plain", "utf-8"))
+    raw_msg = msg.as_string()
     try:
-        msg = MIMEMultipart()
-        msg["From"] = SMTP_USER
-        msg["To"] = target
-        msg["Subject"] = subject
-        msg.attach(MIMEText(body, "plain", "utf-8"))
         if SMTP_USE_SSL:
-            server = smtplib.SMTP_SSL(SMTP_HOST, int(SMTP_PORT), timeout=20)
+            server = smtplib.SMTP_SSL(SMTP_HOST, int(SMTP_PORT), timeout=15)
         else:
-            server = smtplib.SMTP(SMTP_HOST, int(SMTP_PORT), timeout=20)
-            server.starttls()
-        server.login(SMTP_USER, SMTP_PASS)
-        server.sendmail(SMTP_USER, target, msg.as_string())
+            server = smtplib.SMTP(SMTP_HOST, int(SMTP_PORT), timeout=15)
+            try:
+                server.starttls()
+            except Exception:
+                pass
+        if SMTP_USER and SMTP_PASS:
+            server.login(SMTP_USER, SMTP_PASS)
+        server.sendmail(SMTP_USER, target, raw_msg)
         server.quit()
         print("Email sent")
+        return True
     except Exception as e:
+        if str(SMTP_HOST).strip().lower() in ("localhost", "127.0.0.1"):
+            try:
+                server = smtplib.SMTP("127.0.0.1", 25, timeout=10)
+                if SMTP_USER and SMTP_PASS:
+                    try:
+                        server.login(SMTP_USER, SMTP_PASS)
+                    except Exception:
+                        pass
+                server.sendmail(SMTP_USER, target, raw_msg)
+                server.quit()
+                print("Email sent via localhost:25 fallback")
+                return True
+            except Exception:
+                pass
         print("Email error:", e)
+        return False
 
 
-def send_telegram(text: str, chat_id: Optional[str] = None):
-    target = chat_id or TELEGRAM_CHAT_ID
+def send_telegram(text: str, chat_id: Optional[str] = None) -> bool:
+    raw_target = chat_id if chat_id is not None else TELEGRAM_CHAT_ID
+    target = normalize_digits(str(raw_target or "")).strip()
     if not TELEGRAM_BOT_TOKEN or not target:
-        return
+        return False
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     try:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": target, "text": text, "parse_mode": "HTML"},
+        r = requests.post(
+            url,
+            json={"chat_id": target, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True},
             timeout=10,
         )
+        if r.status_code == 200:
+            return True
+        clean_plain = re.sub(r"</?b>", "", str(text or "")).replace("<br>", "\n")
+        r2 = requests.post(
+            url,
+            json={"chat_id": target, "text": clean_plain, "disable_web_page_preview": True},
+            timeout=10,
+        )
+        return r2.status_code == 200
     except Exception as e:
         print("Telegram error:", e)
+        return False
 
 
 
@@ -4396,6 +4691,14 @@ def _b64url(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).decode("utf-8").rstrip("=")
 
 
+def _default_vapid_subject() -> str:
+    for candidate in (SMTP_USER, NOTIFY_EMAIL, "info@didastyar.ir"):
+        val = str(candidate or "").strip()
+        if "@" in val and not val.endswith(".local"):
+            return val if val.startswith("mailto:") else f"mailto:{val}"
+    return "mailto:info@didastyar.ir"
+
+
 def ensure_vapid_keys(conn=None):
     close = False
     if conn is None:
@@ -4403,6 +4706,10 @@ def ensure_vapid_keys(conn=None):
         close = True
     pub = get_meta(conn, "vapid_public")
     priv = get_meta(conn, "vapid_private")
+    subj = get_meta(conn, "vapid_subject")
+    if subj and subj.endswith(".local"):
+        set_meta(conn, "vapid_subject", _default_vapid_subject())
+        conn.commit()
     if pub and priv:
         if close:
             conn.close()
@@ -4418,7 +4725,7 @@ def ensure_vapid_keys(conn=None):
         pub_s = _b64url(pub_bytes)
         set_meta(conn, "vapid_public", pub_s)
         set_meta(conn, "vapid_private", priv_s)
-        set_meta(conn, "vapid_subject", "mailto:admin@divar-monitor.local")
+        set_meta(conn, "vapid_subject", _default_vapid_subject())
         conn.commit()
         print("[PWA] VAPID keys generated")
         if close:
@@ -4436,7 +4743,9 @@ def send_web_push_to_user(user_id: int, title: str, body: str, url: str = "/"):
     ensure_vapid_keys(conn)
     pub = get_meta(conn, "vapid_public")
     priv = get_meta(conn, "vapid_private")
-    subject = get_meta(conn, "vapid_subject") or "mailto:admin@divar-monitor.local"
+    subject = get_meta(conn, "vapid_subject") or _default_vapid_subject()
+    if subject.endswith(".local"):
+        subject = _default_vapid_subject()
     rows = conn.execute(
         "SELECT * FROM push_subscriptions WHERE user_id=?", (user_id,)
     ).fetchall()
@@ -4448,7 +4757,11 @@ def send_web_push_to_user(user_id: int, title: str, body: str, url: str = "/"):
     except Exception:
         print("[PWA] pywebpush not installed — on server: pip install pywebpush")
         return 0
-    payload = json.dumps({"title": title, "body": body, "url": url}, ensure_ascii=False)
+    unique_tag = f"divar-{user_id}-{int(time.time() * 1000)}"
+    payload = json.dumps(
+        {"title": title, "body": body, "url": url or "/notifications", "tag": unique_tag},
+        ensure_ascii=False,
+    )
     sent = 0
     for row in rows:
         sub = {
@@ -4461,6 +4774,9 @@ def send_web_push_to_user(user_id: int, title: str, body: str, url: str = "/"):
                 data=payload,
                 vapid_private_key=priv,
                 vapid_claims={"sub": subject},
+                ttl=86400,
+                timeout=10,
+                headers={"Urgency": "high"},
             )
             sent += 1
         except Exception as e:
@@ -4531,25 +4847,26 @@ def notify(
 ):
     """ارسال ایمیل / تلگرام / وب‌پوش و در صورت نیاز ذخیره در جدول اعلان‌ها"""
     push_url = link or "/notifications"
+    clean = (text or "").replace("<b>", "").replace("</b>", "").replace("<br>", "\n")
     if user_id:
         try:
             send_web_push_to_user(
                 user_id,
                 subject or "دیده‌بان دیوار",
-                (text or "")[:180].replace("\n", " "),
+                clean[:180].replace("\n", " "),
                 push_url,
             )
         except Exception as _pe:
             print("push notify error:", _pe)
         if save:
             try:
-                body_preview = (text or "").replace("<b>", "").replace("</b>", "").replace("<br>", "\n")
-                save_notification(user_id, subject or "آگهی جدید", body_preview[:500], link=link, monitor_id=monitor_id)
+                save_notification(user_id, subject or "آگهی جدید", clean[:500], link=link, monitor_id=monitor_id)
             except Exception as _se:
                 print("notify save error:", _se)
-    clean = text.replace("<b>", "").replace("</b>", "").replace("<br>", "\n")
-    send_email(subject, clean, to_email=email)
-    send_telegram(text, chat_id=telegram_chat_id)
+    if email or user_id is None:
+        send_email(subject, clean, to_email=email)
+    if telegram_chat_id or user_id is None:
+        send_telegram(text, chat_id=telegram_chat_id)
 
 
 # ====================== Auth Routes ======================
@@ -4935,6 +5252,7 @@ def admin_extend_user(uid):
 @api_admin_required
 def admin_delete_user(uid):
     conn = get_db()
+    conn.execute("DELETE FROM seen_ads WHERE monitor_id IN (SELECT id FROM monitors WHERE user_id=?)", (uid,))
     conn.execute("DELETE FROM monitors WHERE user_id=?", (uid,))
     conn.execute("DELETE FROM users WHERE id=? AND role != 'admin'", (uid,))
     conn.commit()
@@ -5061,6 +5379,127 @@ def toggle_monitor(mid):
     return jsonify({"success": True, "is_active": new_val})
 
 
+@app.route("/api/monitors/<int:mid>", methods=["PUT", "PATCH"])
+@api_login_required
+@subscription_required
+def update_monitor(mid):
+    user = get_current_user()
+    conn = get_db()
+    row = _own_monitor_or_admin(conn, user, mid)
+    if not row:
+        conn.close()
+        return jsonify({"success": False, "error": "not_found"}), 404
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") if "name" in data else row["name"]) or "مانیتور بدون نام"
+    category = data.get("category") if "category" in data else row["category"]
+    if "settings" in data and isinstance(data["settings"], dict):
+        settings_json = json.dumps(data["settings"], ensure_ascii=False)
+    else:
+        settings_json = row["settings_json"]
+    track_price = (1 if data.get("track_price") else 0) if "track_price" in data else row["track_price"]
+    is_active = (1 if data.get("is_active") else 0) if "is_active" in data else row["is_active"]
+    conn.execute(
+        "UPDATE monitors SET name=?, category=?, settings_json=?, track_price=?, is_active=? WHERE id=?",
+        (name, category, settings_json, track_price, is_active, mid),
+    )
+    conn.commit()
+    conn.close()
+    return jsonify({"success": True, "id": mid})
+
+
+@app.route("/api/monitors/<int:mid>/run", methods=["POST"])
+@api_login_required
+@subscription_required
+def run_monitor_now(mid):
+    user = get_current_user()
+    conn = get_db()
+    row = _own_monitor_or_admin(conn, user, mid)
+    if not row:
+        conn.close()
+        return jsonify({"success": False, "error": "not_found"}), 404
+    owner = conn.execute("SELECT * FROM users WHERE id=?", (row["user_id"],)).fetchone() if row["user_id"] else user
+    conn.close()
+    try:
+        settings = json.loads(row["settings_json"] or "{}")
+        settings["category"] = row["category"]
+        res = run_search_logic(settings)
+        ads = res.get("ads") or []
+        now_iso = datetime.now().isoformat()
+        new_ads = []
+        conn2 = get_db()
+        try:
+            for ad in ads:
+                token = str(ad.get("token") or "").strip()
+                if not token:
+                    continue
+                exists = conn2.execute(
+                    "SELECT 1 FROM seen_ads WHERE token=? AND monitor_id=?",
+                    (token, mid),
+                ).fetchone()
+                if exists:
+                    continue
+                conn2.execute(
+                    "INSERT OR REPLACE INTO seen_ads (token, monitor_id, title, price, price_num, link, found_at, last_checked) VALUES (?,?,?,?,?,?,?,?)",
+                    (token, mid, ad.get("title"), ad.get("price"), ad.get("price_num"), ad.get("link"), now_iso, now_iso),
+                )
+                conn2.execute(
+                    "INSERT INTO history (monitor_id, monitor_name, token, title, price, link, matched_keywords, value_score, found_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                    (
+                        mid,
+                        row["name"],
+                        token,
+                        ad.get("title"),
+                        ad.get("price"),
+                        ad.get("link"),
+                        ",".join(ad.get("matched_keywords") or []),
+                        ad.get("value_score"),
+                        now_iso,
+                    ),
+                )
+                new_ads.append(ad)
+            if new_ads and owner:
+                for ad in new_ads[:50]:
+                    score_txt = f" · امتیاز {int(round(ad['value_score']))}/100" if ad.get("value_score") else ""
+                    kw_txt = f" · 🎯 {','.join(ad['matched_keywords'])}" if ad.get("matched_keywords") else ""
+                    save_notification(
+                        user_id=owner["id"],
+                        title=f"🔔 {row['name']}: {(ad.get('title') or '')[:90]}",
+                        body=f"💰 {ad.get('price') or ''}{score_txt}{kw_txt}",
+                        link=ad.get("link"),
+                        monitor_id=mid,
+                        conn=conn2,
+                    )
+            conn2.commit()
+        finally:
+            conn2.close()
+        if new_ads and owner:
+            lines = [f"<b>🔔 مانیتور «{row['name']}» — {len(new_ads)} آگهی جدید</b>\n"]
+            for ad in new_ads[:12]:
+                kw = f" 🎯[{','.join(ad.get('matched_keywords') or [])}]" if ad.get("matched_keywords") else ""
+                vs = f" ⭐{int(round(ad['value_score']))}/100" if ad.get("value_score") else ""
+                lines.append(f"• {ad.get('title')}{kw}{vs}\n💰 {ad.get('price')}\n🔗 {ad.get('link')}\n")
+            if len(new_ads) > 12:
+                lines.append(f"\n... و {len(new_ads) - 12} آگهی جدید دیگر در پنل اعلان‌ها")
+            notify(
+                "\n".join(lines),
+                subject=f"دیوار [{row['name']}] - {len(new_ads)} آگهی جدید",
+                telegram_chat_id=owner["telegram_chat_id"],
+                email=owner["notify_email"],
+                user_id=owner["id"],
+                link=new_ads[0].get("link") if len(new_ads) == 1 else "/notifications",
+                monitor_id=mid,
+                save=False,
+            )
+        return jsonify({
+            "success": True,
+            "found": len(ads),
+            "new_ads": len(new_ads),
+            "message": f"بررسی انجام شد: {len(ads)} آگهی بررسی شد و {len(new_ads)} آگهی جدید ثبت گردید.",
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 @app.route("/api/monitors/<int:mid>", methods=["DELETE"])
 @api_login_required
 def delete_monitor(mid):
@@ -5070,6 +5509,7 @@ def delete_monitor(mid):
     if not row:
         conn.close()
         return jsonify({"success": False}), 404
+    conn.execute("DELETE FROM seen_ads WHERE monitor_id=?", (mid,))
     conn.execute("DELETE FROM monitors WHERE id=?", (mid,))
     conn.commit()
     conn.close()
@@ -5218,16 +5658,34 @@ def api_history_clear():
 @api_login_required
 def test_telegram():
     user = get_current_user()
-    send_telegram("✅ تست نوتیفیکیشن دیوار مانیتور", chat_id=user["telegram_chat_id"])
-    return jsonify({"success": True})
+    data = request.get_json(silent=True) or {}
+    chat_id = (data.get("telegram_chat_id") or user["telegram_chat_id"] or "").strip()
+    sent = send_telegram("✅ تست نوتیفیکیشن دیوار مانیتور", chat_id=chat_id or None)
+    save_notification(user["id"], "✅ تست اعلان تلگرام", "پیام تست تلگرام بررسی شد.", link="/account")
+    return jsonify({
+        "success": True,
+        "sent": bool(sent),
+        "message": "پیام تست به تلگرام ارسال شد." if sent else "ارسال تلگرام انجام نشد (Chat ID یا توکن ربات را بررسی کنید).",
+    })
 
 
 @app.route("/api/test-email", methods=["POST"])
 @api_login_required
 def test_email():
     user = get_current_user()
-    notify("این یک پیام تست از مانیتور دیوار است.", subject="تست نوتیف دیوار", email=user["notify_email"])
-    return jsonify({"success": True})
+    data = request.get_json(silent=True) or {}
+    target_email = (data.get("notify_email") or user["notify_email"] or (NOTIFY_EMAIL if user["role"] == "admin" else "") or "").strip()
+    notify(
+        "این یک پیام تست از مانیتور دیوار است.",
+        subject="تست نوتیف دیوار",
+        email=target_email or None,
+        user_id=user["id"],
+        link="/notifications",
+    )
+    return jsonify({
+        "success": True,
+        "message": f"اعلان تست ثبت و به {target_email or 'پنل اعلان‌ها'} ارسال شد.",
+    })
 
 
 # ====================== اشتراک / پرداخت / پشتیبانی / محتوا ======================
@@ -5424,7 +5882,13 @@ def admin_payments():
 def admin_review_payment(pid):
     admin = get_current_user()
     data = request.get_json(silent=True) or {}
-    action = data.get("action")  # approve | reject
+    raw_action = str(data.get("action") or data.get("status") or "").strip().lower()
+    if raw_action in ("approve", "approved"):
+        action = "approve"
+    elif raw_action in ("reject", "rejected"):
+        action = "reject"
+    else:
+        action = ""
     note = (data.get("note") or "").strip()
     conn = get_db()
     row = conn.execute("SELECT * FROM payment_requests WHERE id=?", (pid,)).fetchone()
@@ -5435,6 +5899,8 @@ def admin_review_payment(pid):
         conn.close()
         return jsonify({"success": False, "error": "already reviewed"}), 400
 
+    notif_title = ""
+    notif_body = ""
     if action == "approve":
         user = conn.execute("SELECT * FROM users WHERE id=?", (row["user_id"],)).fetchone()
         base = datetime.now()
@@ -5454,24 +5920,34 @@ def admin_review_payment(pid):
             "UPDATE payment_requests SET status='approved', admin_note=?, reviewed_at=?, reviewed_by=? WHERE id=?",
             (note, datetime.now().isoformat(), admin["id"], pid),
         )
+        notif_title = "✅ اشتراک شما فعال شد"
+        notif_body = f"اشتراک شما تأیید و تا {new_exp[:10]} فعال شد."
         conn.execute(
             "INSERT INTO support_messages (user_id, sender, message, is_read, created_at) VALUES (?,?,?,?,?)",
-            (row["user_id"], "admin", f"✅ اشتراک شما تأیید و تا {new_exp[:10]} فعال شد.", 0, datetime.now().isoformat()),
+            (row["user_id"], "admin", f"✅ {notif_body}", 0, datetime.now().isoformat()),
         )
+        save_notification(row["user_id"], notif_title, notif_body, link="/subscribe", conn=conn)
     elif action == "reject":
+        notif_title = "❌ درخواست پرداخت رد شد"
+        notif_body = f"درخواست پرداخت رد شد. {note}".strip()
         conn.execute(
             "UPDATE payment_requests SET status='rejected', admin_note=?, reviewed_at=?, reviewed_by=? WHERE id=?",
             (note or "رد شد", datetime.now().isoformat(), admin["id"], pid),
         )
         conn.execute(
             "INSERT INTO support_messages (user_id, sender, message, is_read, created_at) VALUES (?,?,?,?,?)",
-            (row["user_id"], "admin", f"❌ درخواست پرداخت رد شد. {note}".strip(), 0, datetime.now().isoformat()),
+            (row["user_id"], "admin", f"❌ {notif_body}", 0, datetime.now().isoformat()),
         )
+        save_notification(row["user_id"], notif_title, notif_body, link="/subscribe", conn=conn)
     else:
         conn.close()
         return jsonify({"success": False, "error": "action invalid"}), 400
     conn.commit()
     conn.close()
+    try:
+        send_web_push_to_user(row["user_id"], notif_title, notif_body, "/subscribe")
+    except Exception:
+        pass
     return jsonify({"success": True})
 
 
@@ -5563,8 +6039,13 @@ def admin_support_user(uid):
         "INSERT INTO support_messages (user_id, sender, message, is_read, created_at) VALUES (?,?,?,?,?)",
         (uid, "admin", msg, 0, datetime.now().isoformat()),
     )
+    save_notification(uid, "💬 پاسخ جدید پشتیبانی", msg[:300], link="/support", conn=conn)
     conn.commit()
     conn.close()
+    try:
+        send_web_push_to_user(uid, "💬 پاسخ جدید پشتیبانی", msg[:160], "/support")
+    except Exception:
+        pass
     return jsonify({"success": True})
 
 
@@ -5635,8 +6116,9 @@ def push_subscribe():
 @api_login_required
 def push_test():
     user = get_current_user()
-    n = send_web_push_to_user(user["id"], "تست دیده‌بان دیوار", "اگر این پیام را می‌بینید نوتیفیکیشن فعال است", "/")
-    return jsonify({"success": True, "sent": n, "message": ("%d نوتیف ارسال شد" % n) if n else "subscription نیست یا pywebpush نصب نشده"})
+    save_notification(user["id"], "🔔 تست نوتیفیکیشن مرورگر", "اگر این پیام را می‌بینید نوتیفیکیشن فعال است.", link="/notifications")
+    n = send_web_push_to_user(user["id"], "تست دیده‌بان دیوار", "اگر این پیام را می‌بینید نوتیفیکیشن فعال است", "/notifications")
+    return jsonify({"success": True, "sent": n, "message": ("%d نوتیف ارسال شد" % n) if n else "سابسکریپشن مرورگر ثبت نشده (اما در پنل اعلان‌ها ثبت شد)"})
 
 
 @app.route("/api/push/reset", methods=["POST"])

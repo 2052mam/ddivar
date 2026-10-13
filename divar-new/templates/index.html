@@ -499,16 +499,30 @@ function selectAllBrand(btn, kind){
 }
 let currentCategory = "mobile";
 
+function switchPageTab(pageName) {
+  const btn = document.querySelector(`[data-page="${pageName}"]`);
+  const section = document.getElementById('page-' + pageName);
+  if (!btn || !section) return;
+  document.querySelectorAll('[data-page]').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  document.querySelectorAll('.page-section').forEach(p => p.classList.remove('active'));
+  section.classList.add('active');
+  if (pageName === 'monitors') loadMonitors();
+  if (pageName === 'history') loadHistory();
+}
+
 document.querySelectorAll('[data-page]').forEach(btn => {
-  btn.addEventListener('click', () => {
-    document.querySelectorAll('[data-page]').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-    document.querySelectorAll('.page-section').forEach(p => p.classList.remove('active'));
-    document.getElementById('page-' + btn.dataset.page).classList.add('active');
-    if (btn.dataset.page === 'monitors') loadMonitors();
-    if (btn.dataset.page === 'history') loadHistory();
-  });
+  btn.addEventListener('click', () => switchPageTab(btn.dataset.page));
 });
+
+function handleHashNavigation() {
+  const hash = (window.location.hash || '').replace('#', '').trim();
+  if (hash === 'monitors' || hash === 'history' || hash === 'search') {
+    switchPageTab(hash);
+  }
+}
+window.addEventListener('hashchange', handleHashNavigation);
+setTimeout(handleHashNavigation, 0);
 
 
 function setCategory(cat){
@@ -850,27 +864,43 @@ async function loadMonitors() {
     card.style.animationDelay = (i * 0.05) + 's';
     card.innerHTML = `
       <div class="m-head">
-        <h6>${m.name}</h6>
+        <h6>${escapeHtml(m.name || '')}</h6>
         <span class="status-pill ${active ? 'on' : 'off'}">${active ? 'فعال' : 'غیرفعال'}</span>
       </div>
-      <div class="monitor-meta">${m.category === 'mobile' ? '📱 موبایل' : m.category === 'car' ? '🚗 خودرو' : m.category === 'apartment-sell' ? '🏠 فروش' : m.category === 'apartment-rent' ? '🔑 اجاره' : m.category}${track} · ${m.created_at || ''}</div>
+      <div class="monitor-meta">${m.category === 'mobile' ? '📱 موبایل' : m.category === 'car' ? '🚗 خودرو' : m.category === 'apartment-sell' ? '🏠 فروش' : m.category === 'apartment-rent' ? '🔑 اجاره' : m.category}${track} · ${(m.created_at || '').replace('T', ' ').slice(0, 16)}</div>
       <div class="monitor-actions">
+        <button class="btn-ghost-neo" onclick="runMonitorNow(${m.id}, this)">🔄 بررسی الان</button>
         <button class="btn-ghost-neo" onclick="toggleMonitor(${m.id})">${active ? 'غیرفعال' : 'فعال'} کن</button>
         <button class="btn-ghost-neo" onclick="deleteMonitor(${m.id})" style="color:#C22448;">حذف</button>
       </div>`;
     box.appendChild(card);
   });
 }
+async function runMonitorNow(id, btn) {
+  const orig = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = 'در حال بررسی...'; }
+  try {
+    const res = await fetch('/api/monitors/' + id + '/run', { method: 'POST' });
+    const d = await res.json();
+    alert(d.message || (d.success ? `بررسی انجام شد (${d.new_ads || 0} آگهی جدید)` : (d.error || 'خطا در بررسی مانیتور')));
+  } catch (e) {
+    alert('خطا در ارتباط با سرور');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = orig || '🔄 بررسی الان'; }
+  }
+}
 async function toggleMonitor(id) { await fetch('/api/monitors/' + id + '/toggle', { method: 'POST' }); loadMonitors(); }
 async function deleteMonitor(id) { if (!confirm('حذف شود؟')) return; await fetch('/api/monitors/' + id, { method: 'DELETE' }); loadMonitors(); }
 
 document.getElementById('testTelegramBtn').addEventListener('click', async () => {
-  await fetch('/api/test-telegram', { method: 'POST' });
-  alert('پیام تست تلگرام ارسال شد.');
+  const res = await fetch('/api/test-telegram', { method: 'POST' });
+  const d = await res.json().catch(() => ({}));
+  alert(d.message || 'پیام تست تلگرام بررسی شد.');
 });
 document.getElementById('testEmailBtn').addEventListener('click', async () => {
-  await fetch('/api/test-email', { method: 'POST' });
-  alert('پیام تست ایمیل ارسال شد. اینباکس را چک کن.');
+  const res = await fetch('/api/test-email', { method: 'POST' });
+  const d = await res.json().catch(() => ({}));
+  alert(d.message || 'پیام تست ایمیل ارسال شد.');
 });
 
 async function loadHistory() {

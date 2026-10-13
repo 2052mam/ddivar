@@ -249,12 +249,24 @@
 
   async function subscribePush(reg) {
     try {
-      // اگر سابسکریپشن قدیمی هست، اول چک کن
       let sub = await reg.pushManager.getSubscription();
       const res = await fetch('/api/push/vapid-public', { credentials: 'same-origin' });
       const data = await res.json();
       if (!data.success || !data.publicKey) return;
       const key = urlBase64ToUint8Array(data.publicKey);
+      if (sub && sub.options && sub.options.applicationServerKey) {
+        const curKey = new Uint8Array(sub.options.applicationServerKey);
+        let mismatch = curKey.length !== key.length;
+        if (!mismatch) {
+          for (let i = 0; i < curKey.length; i++) {
+            if (curKey[i] !== key[i]) { mismatch = true; break; }
+          }
+        }
+        if (mismatch) {
+          try { await sub.unsubscribe(); } catch (_) {}
+          sub = null;
+        }
+      }
       if (!sub) {
         sub = await reg.pushManager.subscribe({
           userVisibleOnly: true,

@@ -94,7 +94,7 @@ self.addEventListener('push', (event) => {
       dir: 'rtl',
       lang: 'fa',
       vibrate: [120, 60, 120],
-      tag: data.tag || 'divar-ad',
+      tag: data.tag || ('divar-ad-' + Date.now()),
       renotify: true,
     })
   );

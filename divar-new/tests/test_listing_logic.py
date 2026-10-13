@@ -1,7 +1,8 @@
+import json
 import os
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import app
 
@@ -425,6 +426,280 @@ class ListingLogicTests(unittest.TestCase):
         app.ensure_ads_rated(ads, "mobile")
         self.assertIn("value_score", ads[0])
         self.assertIsNotNone(ads[0]["value_score"])
+
+    def test_thread_exhaustion_graceful_fallback_no_nested_threads(self):
+        """در صورت رسیدن به سقف ترد هاست اشتراکی (can't start new thread) هیچ مدلی نباید حذف شود."""
+        def fake_search_divar(payload, **kwargs):
+            models = (
+                payload.get("search_data", {})
+                .get("form_data", {})
+                .get("data", {})
+                .get("brand_model", {})
+                .get("repeated_string", {})
+                .get("value", ["Pride 131"])
+            )
+            m = models[0]
+            code = "131" if "131" in m else "132"
+            return {
+                "list_widgets": [
+                    {
+                        "widget_type": "POST_ROW",
+                        "data": {
+                            "token": f"tok_{code}_{i}",
+                            "title": f"پراید {code} مدل ۹۵ سالم",
+                            "middle_description_text": f"{250 + i * 20},000,000 تومان",
+                            "bottom_description_text": "۱ ساعت پیش",
+                        },
+                    }
+                    for i in range(5)
+                ]
+            }
+
+        with patch("app.search_divar", side_effect=fake_search_divar), patch(
+            "app.get_post_details_cached", return_value={"description": "بدون رنگ و موتور سالم"}
+        ), patch("app.ThreadPoolExecutor", side_effect=RuntimeError("can't start new thread")):
+            res = app.run_search_logic({
+                "category": "car",
+                "city": "5",
+                "models": ["Pride 131", "Pride 132"],
+                "smart_search": True,
+                "smart_profile": "balanced",
+            })
+        self.assertTrue(res["success"])
+        self.assertIn("Pride 131", res["model_info"])
+        self.assertIn("Pride 132", res["model_info"])
+        self.assertGreaterEqual(res["count"], 2)
+
+    def test_healthy_car_chassis_and_negated_keywords_do_not_drop_listings(self):
+        """ردیف‌های استاندارد «وضعیت شاسی جلو: سالم و پلمپ» و «در رنگ سفید» یا «معاوضه ندارم» نباید جریمه/حذف شوند."""
+        payload = {
+            "sections": [
+                {
+                    "section_name": "LIST_DATA",
+                    "widgets": [
+                        {
+                            "widget_type": "UNEXPANDABLE_ROW",
+                            "data": {"title": "وضعیت شاسی جلو", "value": "سالم و پلمپ"},
+                        },
+                        {
+                            "widget_type": "UNEXPANDABLE_ROW",
+                            "data": {"title": "وضعیت شاسی عقب", "value": "سالم و پلمپ"},
+                        },
+                        {
+                            "widget_type": "UNEXPANDABLE_ROW",
+                            "data": {"title": "وضعیت بدنه", "value": "سالم و بی‌خط و خش"},
+                        },
+                        {
+                            "widget_type": "UNEXPANDABLE_ROW",
+                            "data": {"title": "رنگ", "value": "سفید"},
+                        },
+                        {
+                            "widget_type": "UNEXPANDABLE_ROW",
+                            "data": {"title": "معاوضه", "value": "ندارد"},
+                        },
+                    ],
+                },
+                {
+                    "section_name": "DESCRIPTION",
+                    "widgets": [
+                        {
+                            "widget_type": "DESCRIPTION_ROW",
+                            "data": {
+                                "text": "خودرو در رنگ سفید بسیار تمیز، سقف بدون رنگ، کاپوت بی رنگ، معاوضه ندارم و اقساط نداریم."
+                            },
+                        }
+                    ],
+                },
+            ]
+        }
+        details = app.extract_post_details(payload)
+        ad = {
+            "token": "Healthy_Car_1",
+            "title": "پراید 131 مدل ۹۶ بدون رنگ",
+            "price_num": 280_000_000,
+            "price": "280,000,000 تومان",
+            "time_text": "۱ ساعت پیش",
+            "category": "car",
+        }
+        app._merge_post_details(ad, details)
+        valuation = app.evaluate_car_condition(ad)
+        self.assertEqual(valuation["paint_deduction_percent"], 0.0)
+        self.assertEqual(valuation["chassis_deduction_percent"], 0.0)
+        self.assertEqual(valuation["total_deduction_percent"], 0.0)
+        self.assertEqual(valuation["color_bonus_percent"], 2.5)
+
+        filtered = app.filter_negative_keywords([ad], ["معاوضه", "اقساط"])
+        self.assertEqual(len(filtered), 1)
+
+        cheaper_score = app.score_ad_smart(
+            {"title": "پراید 131", "price_num": 270_000_000, "time_text": "۱ ساعت پیش"},
+            300_000_000,
+            "car",
+            profile="balanced",
+        )["value_score"]
+        avg_score = app.score_ad_smart(
+            {"title": "پراید 131", "price_num": 300_000_000, "time_text": "۱ ساعت پیش"},
+            300_000_000,
+            "car",
+            profile="open",
+        )["value_score"]
+        self.assertGreater(cheaper_score, avg_score)
+
+    def test_monitor_per_monitor_seen_ads_and_price_change_detection(self):
+        """آگهی دیده‌شده در مانیتور ۱ نباید مانیتور ۲ را مسدود کند و تغییر قیمت باید ثبت شود."""
+        import monitor
+
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
+            db_path = tmp.name
+        original_db_path = app.DATABASE_PATH
+        try:
+            app.DATABASE_PATH = db_path
+            app._RESOLVED_DB_CACHE.clear()
+            app._INITIALIZED_DB_PATHS.discard(db_path)
+            app.init_db(force=True)
+
+            conn = app.get_db()
+            admin = conn.execute("SELECT id FROM users WHERE role='admin' LIMIT 1").fetchone()
+            uid = admin["id"]
+            settings_json = json.dumps({"category": "car", "city": "5", "models": ["Pride 131"]})
+            conn.execute(
+                "INSERT INTO monitors (id, user_id, name, category, settings_json, is_active, track_price, created_at) VALUES (?,?,?,?,?,?,?,?)",
+                (101, uid, "مانیتور اول", "car", settings_json, 1, 1, "2026-10-13T08:00:00"),
+            )
+            conn.execute(
+                "INSERT INTO monitors (id, user_id, name, category, settings_json, is_active, track_price, created_at) VALUES (?,?,?,?,?,?,?,?)",
+                (102, uid, "مانیتور دوم", "car", settings_json, 1, 1, "2026-10-13T08:00:00"),
+            )
+            # آگهی قبلاً فقط در مانیتور ۱۰۱ دیده شده است
+            conn.execute(
+                "INSERT INTO seen_ads (token, monitor_id, title, price, price_num, link, found_at, last_checked) VALUES (?,?,?,?,?,?,?,?)",
+                ("Shared_Tok_1", 101, "پراید 131", "300,000,000 تومان", 300_000_000, "https://divar.ir/v/Shared_Tok_1", "2026-10-13T07:00:00", "2026-10-13T07:00:00"),
+            )
+            conn.commit()
+            conn.close()
+
+            fake_search_res = {
+                "success": True,
+                "ads": [
+                    {
+                        "token": "Shared_Tok_1",
+                        "title": "پراید 131",
+                        "price": "300,000,000 تومان",
+                        "price_num": 300_000_000,
+                        "link": "https://divar.ir/v/Shared_Tok_1",
+                        "matched_keywords": [],
+                        "value_score": 68.0,
+                    }
+                ],
+            }
+            with patch("monitor.run_search_logic", return_value=fake_search_res), patch(
+                "monitor.get_post_details_cached", return_value={"price_num": 285_000_000}
+            ), patch("app.send_email"), patch("app.send_telegram"):
+                stats = monitor.run_all_monitors()
+
+            # مانیتور ۱۰۲ باید آگهی را به‌عنوان جدید ثبت کند و تغییر قیمت مانیتور ۱۰۱ هم تشخیص داده شود
+            self.assertEqual(stats["monitors"], 2)
+            self.assertEqual(stats["new_ads"], 1)
+
+            conn = app.get_db()
+            seen_rows = conn.execute("SELECT monitor_id, price_num FROM seen_ads WHERE token='Shared_Tok_1' ORDER BY monitor_id").fetchall()
+            price_changes = conn.execute("SELECT * FROM price_changes WHERE token='Shared_Tok_1'").fetchall()
+            conn.close()
+            self.assertEqual(len(seen_rows), 2)
+            self.assertGreaterEqual(len(price_changes), 1)
+            self.assertIn("285,000,000", price_changes[0]["new_price"])
+        finally:
+            app.DATABASE_PATH = original_db_path
+            app._RESOLVED_DB_CACHE.clear()
+            try:
+                os.remove(db_path)
+            except FileNotFoundError:
+                pass
+
+    def test_monitor_non_blocking_lock_prevents_overlapping_cron_runs(self):
+        """وقتی یک اجرای monitor.py فعال است، اجرای همزمان بعدی باید بدون تداخل رد شود."""
+        import monitor
+
+        with patch("monitor.acquire_monitor_lock", return_value=False):
+            stats = monitor.run_all_monitors()
+        self.assertTrue(stats["skipped_locked"])
+        self.assertEqual(stats["monitors"], 0)
+
+    def test_notifications_web_push_telegram_and_admin_payment_review(self):
+        """تأیید پرداخت ادمین با فیلد status، ارسال تلگرام با کاراکترهای خاص و Web Push با TTL باید کار کنند."""
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
+            db_path = tmp.name
+        original_db_path = app.DATABASE_PATH
+        try:
+            app.DATABASE_PATH = db_path
+            app._RESOLVED_DB_CACHE.clear()
+            app._INITIALIZED_DB_PATHS.discard(db_path)
+            app.init_db(force=True)
+
+            conn = app.get_db()
+            admin_id = conn.execute("SELECT id FROM users WHERE role='admin' LIMIT 1").fetchone()["id"]
+            conn.execute(
+                "INSERT INTO users (username, password_hash, role, is_active, plan, max_monitors) VALUES (?,?,?,?,?,?)",
+                ("buyer1", app.generate_password_hash("secret123"), "user", 1, "trial", 1),
+            )
+            buyer_id = conn.execute("SELECT id FROM users WHERE username='buyer1'").fetchone()["id"]
+            conn.execute(
+                """INSERT INTO payment_requests
+                   (id, user_id, plan_id, plan_name, amount, days, max_monitors, phone, receipt_path, status, created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                (501, buyer_id, "monthly", "ماهانه", 890000, 30, 3, "09120000000", "receipts/test.jpg", "pending", "2026-10-13T09:00:00"),
+            )
+            conn.execute(
+                "INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth, user_agent, created_at, last_seen) VALUES (?,?,?,?,?,?,?)",
+                (buyer_id, "https://fcm.googleapis.com/fcm/send/test-ep", "p256dh-key", "auth-key", "pytest", "2026-10-13", "2026-10-13"),
+            )
+            conn.commit()
+            conn.close()
+
+            client = app.app.test_client()
+            with client.session_transaction() as sess:
+                sess["user_id"] = admin_id
+
+            # پنل ادمین فیلد {status: 'approved', note: '...'} می‌فرستد
+            with patch("pywebpush.webpush") as mock_webpush:
+                resp = client.post("/api/admin/payments/501/review", json={"status": "approved", "note": "تأیید شد"})
+                self.assertEqual(resp.status_code, 200)
+                self.assertTrue(resp.get_json()["success"])
+                self.assertTrue(mock_webpush.called)
+                call_kwargs = mock_webpush.call_args.kwargs
+                self.assertEqual(call_kwargs.get("ttl"), 86400)
+                self.assertFalse(call_kwargs["vapid_claims"]["sub"].endswith(".local"))
+                push_data = json.loads(call_kwargs["data"])
+                self.assertIn("tag", push_data)
+
+            conn = app.get_db()
+            pay_row = conn.execute("SELECT status FROM payment_requests WHERE id=501").fetchone()
+            buyer_row = conn.execute("SELECT plan, max_monitors FROM users WHERE id=?", (buyer_id,)).fetchone()
+            notif_row = conn.execute("SELECT * FROM notifications WHERE user_id=?", (buyer_id,)).fetchone()
+            conn.close()
+            self.assertEqual(pay_row["status"], "approved")
+            self.assertEqual(buyer_row["plan"], "ماهانه")
+            self.assertEqual(buyer_row["max_monitors"], 3)
+            self.assertIsNotNone(notif_row)
+
+            # تست fallback تلگرام وقتی عنوان آگهی کاراکترهای شکننده HTML دارد
+            first_resp = Mock(status_code=400)
+            second_resp = Mock(status_code=200)
+            with patch.object(app, "TELEGRAM_BOT_TOKEN", "test-bot-token"), patch(
+                "app.requests.post", side_effect=[first_resp, second_resp]
+            ) as mock_tg:
+                sent_ok = app.send_telegram("<b>آگهی <ویژه> & فوری</b>", chat_id="۱۲۳۴۵۶۷۸")
+                self.assertTrue(sent_ok)
+                self.assertEqual(mock_tg.call_count, 2)
+                self.assertEqual(mock_tg.call_args_list[0].kwargs["json"]["chat_id"], "12345678")
+                self.assertNotIn("parse_mode", mock_tg.call_args_list[1].kwargs["json"])
+        finally:
+            app.DATABASE_PATH = original_db_path
+            app._RESOLVED_DB_CACHE.clear()
+            try:
+                os.remove(db_path)
+            except FileNotFoundError:
+                pass
 
 
 if __name__ == "__main__":
